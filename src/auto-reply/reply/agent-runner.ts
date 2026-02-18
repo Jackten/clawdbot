@@ -378,12 +378,14 @@ export async function runReplyAgent(params: {
 
     const { runResult, fallbackProvider, fallbackModel, directlySentBlockKeys } = runOutcome;
     let { didLogHeartbeatStrip, autoCompactionCompleted } = runOutcome;
-    const runErrorFallbackPayload =
-      runResult.meta?.error &&
-      (runResult.meta.error.kind === "context_overflow" ||
-        runResult.meta.error.kind === "compaction_failure")
-        ? ({ text: CONTEXT_OVERFLOW_FALLBACK_TEXT, isError: true } satisfies ReplyPayload)
+    const runErrorKind = runResult.meta?.error?.kind;
+    const overflowRecoveryErrorKind =
+      runErrorKind === "context_overflow" || runErrorKind === "compaction_failure"
+        ? runErrorKind
         : undefined;
+    const runErrorFallbackPayload = overflowRecoveryErrorKind
+      ? ({ text: CONTEXT_OVERFLOW_FALLBACK_TEXT, isError: true } satisfies ReplyPayload)
+      : undefined;
 
     if (
       shouldInjectGroupIntro &&
@@ -449,6 +451,21 @@ export async function runReplyAgent(params: {
     // Otherwise, a late typing trigger (e.g. from a tool callback) can outlive the run and
     // keep the typing indicator stuck.
     if (payloadArray.length === 0) {
+      if (runErrorFallbackPayload && overflowRecoveryErrorKind && isDiagnosticsEnabled(cfg)) {
+        emitDiagnosticEvent({
+          type: "overflow.recovery",
+          runId: opts?.runId ?? followupRun.run.sessionId,
+          sessionKey,
+          sessionId: followupRun.run.sessionId,
+          provider: providerUsed,
+          model: modelUsed,
+          stage: "finalized",
+          branch: "fallback_payload_injected_after_empty",
+          outcome: "returned_error_payload",
+          errorKind: overflowRecoveryErrorKind,
+          reasonClass: "empty_payload_after_error",
+        });
+      }
       return finalizeWithFollowup(runErrorFallbackPayload, queueKey, runFollowupTurn);
     }
 
@@ -473,6 +490,21 @@ export async function runReplyAgent(params: {
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
 
     if (replyPayloads.length === 0) {
+      if (runErrorFallbackPayload && overflowRecoveryErrorKind && isDiagnosticsEnabled(cfg)) {
+        emitDiagnosticEvent({
+          type: "overflow.recovery",
+          runId: opts?.runId ?? followupRun.run.sessionId,
+          sessionKey,
+          sessionId: followupRun.run.sessionId,
+          provider: providerUsed,
+          model: modelUsed,
+          stage: "finalized",
+          branch: "fallback_payload_injected_after_empty",
+          outcome: "returned_error_payload",
+          errorKind: overflowRecoveryErrorKind,
+          reasonClass: "empty_payload_after_error",
+        });
+      }
       return finalizeWithFollowup(runErrorFallbackPayload, queueKey, runFollowupTurn);
     }
 

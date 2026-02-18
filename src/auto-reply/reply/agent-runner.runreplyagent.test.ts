@@ -8,6 +8,7 @@ import type { TemplateContext } from "../templating.js";
 import type { GetReplyOptions } from "../types.js";
 import type { FollowupRun, QueueSettings } from "./queue.js";
 import * as sessions from "../../config/sessions.js";
+import { onDiagnosticEvent, resetDiagnosticEventsForTest } from "../../infra/diagnostic-events.js";
 import { createMockTypingController } from "./test-helpers.js";
 
 type AgentRunParams = {
@@ -79,12 +80,14 @@ beforeAll(async () => {
 beforeEach(() => {
   state.runEmbeddedPiAgentMock.mockReset();
   state.runCliAgentMock.mockReset();
+  resetDiagnosticEventsForTest();
   vi.stubEnv("OPENCLAW_TEST_FAST", "1");
 });
 
 function createMinimalRun(params?: {
   opts?: GetReplyOptions;
   resolvedVerboseLevel?: "off" | "on";
+  config?: Record<string, unknown>;
   sessionStore?: Record<string, SessionEntry>;
   sessionEntry?: SessionEntry;
   sessionKey?: string;
@@ -110,7 +113,7 @@ function createMinimalRun(params?: {
       messageProvider: "whatsapp",
       sessionFile: "/tmp/session.jsonl",
       workspaceDir: "/tmp",
-      config: {},
+      config: params?.config ?? {},
       skillsSnapshot: {},
       provider: "anthropic",
       model: "claude",
@@ -609,6 +612,17 @@ describe("runReplyAgent typing (heartbeat)", () => {
   });
 
   it("returns a deterministic overflow fallback when error meta has no payloads", async () => {
+    const overflowEvents: Array<{ branch?: string; stage: string; reasonClass?: string }> = [];
+    const stop = onDiagnosticEvent((evt) => {
+      if (evt.type !== "overflow.recovery") {
+        return;
+      }
+      overflowEvents.push({
+        branch: evt.branch,
+        stage: evt.stage,
+        reasonClass: evt.reasonClass,
+      });
+    });
     state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => ({
       payloads: [],
       meta: {
@@ -620,7 +634,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
       },
     }));
 
-    const { run } = createMinimalRun();
+    const { run } = createMinimalRun({ config: { diagnostics: { enabled: true } } });
     const res = await run();
 
     const payload = Array.isArray(res) ? res[0] : res;
@@ -628,9 +642,30 @@ describe("runReplyAgent typing (heartbeat)", () => {
       text: expect.stringContaining("Context overflow"),
       isError: true,
     });
+    expect(overflowEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: "finalized",
+          branch: "fallback_payload_returned",
+          reasonClass: "embedded_meta_error",
+        }),
+      ]),
+    );
+    stop();
   });
 
   it("returns a deterministic overflow fallback when error payload normalizes to empty", async () => {
+    const overflowEvents: Array<{ branch?: string; stage: string; reasonClass?: string }> = [];
+    const stop = onDiagnosticEvent((evt) => {
+      if (evt.type !== "overflow.recovery") {
+        return;
+      }
+      overflowEvents.push({
+        branch: evt.branch,
+        stage: evt.stage,
+        reasonClass: evt.reasonClass,
+      });
+    });
     state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => ({
       payloads: [{ text: " \n\t ", isError: true }],
       meta: {
@@ -642,7 +677,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
       },
     }));
 
-    const { run } = createMinimalRun();
+    const { run } = createMinimalRun({ config: { diagnostics: { enabled: true } } });
     const res = await run();
 
     const payload = Array.isArray(res) ? res[0] : res;
@@ -650,6 +685,16 @@ describe("runReplyAgent typing (heartbeat)", () => {
       text: expect.stringContaining("Context overflow"),
       isError: true,
     });
+    expect(overflowEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: "finalized",
+          branch: "fallback_payload_injected_after_empty",
+          reasonClass: "empty_payload_after_error",
+        }),
+      ]),
+    );
+    stop();
   });
 
   it("resets the session after role ordering payloads", async () => {
