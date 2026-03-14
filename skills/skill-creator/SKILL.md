@@ -1,11 +1,23 @@
 ---
 name: skill-creator
-description: Create, edit, improve, or audit AgentSkills. Use when creating a new skill from scratch or when asked to improve, review, audit, tidy up, or clean up an existing skill or SKILL.md file. Also use when editing or restructuring a skill directory (moving files to references/ or scripts/, removing stale content, validating against the AgentSkills spec). Triggers on phrases like "create a skill", "author a skill", "tidy up a skill", "improve this skill", "review the skill", "clean up the skill", "audit the skill".
+description: Create, edit, improve, or audit AgentSkills. Also use when editing any document that will be injected into agent context/prompt state, especially bootstrap documents such as AGENTS.md, SOUL.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md, or other context-loaded instruction files. Use when creating a new skill from scratch or when asked to improve, review, audit, tidy up, or clean up an existing skill or SKILL.md file. Also use when editing or restructuring a skill directory (moving files to references/ or scripts/, removing stale content, validating against the AgentSkills spec). Triggers on phrases like "create a skill", "author a skill", "tidy up a skill", "improve this skill", "review the skill", "clean up the skill", "audit the skill", or when editing bootstrap/context docs.
 ---
 
 # Skill Creator
 
 This skill provides guidance for creating effective skills.
+
+## Bootstrap / Context-Injected Docs
+
+Treat any document that is automatically loaded into agent context as high-leverage prompt infrastructure. That includes bootstrap files such as `AGENTS.md`, `SOUL.md`, `USER.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`, `MEMORY.md`, and similar context-injected instruction files.
+
+When asked to edit one of those files, use this skill first. Apply the same standards you would use for editing a skill:
+
+- keep changes concise
+- avoid prompt bloat
+- prefer clear rules over rambling explanation
+- reduce ambiguity instead of layering on extra prose
+- be careful because these files directly shape agent behavior
 
 ## About Skills
 
