@@ -26,21 +26,22 @@ metadata:
 
 Oracle bundles your prompt + selected files into one “one-shot” request so another model can answer with real repo context (API or browser automation). Treat output as advisory: verify against code + tests.
 
-## Main use case (browser, GPT‑5.2 Pro)
+## Main use case (browser, GPT‑5.4 Pro)
 
-Default workflow here: `--engine browser` with GPT‑5.2 Pro in ChatGPT. This is the common “long think” path: ~10 minutes to ~1 hour is normal; expect a stored session you can reattach to.
+Default workflow here: `--engine browser` with GPT‑5.4 Pro in ChatGPT. This is the common “long think” path: ~10 minutes to ~1 hour is normal; expect a stored session you can reattach to.
 
 Recommended defaults:
 
 - Engine: browser (`--engine browser`)
-- Model: GPT‑5.2 Pro (`--model gpt-5.2-pro` or `--model "5.2 Pro"`)
+- Model: GPT‑5.4 Pro (`--model gpt-5.4-pro` or `--model "5.4 Pro"`)
 
 ## Golden path
 
 1. Pick a tight file set (fewest files that still contain the truth).
-2. Preview payload + token spend (`--dry-run` + `--files-report`).
-3. Use browser mode for the usual GPT‑5.2 Pro workflow; use API only when you explicitly want it.
-4. If the run detaches/timeouts: reattach to the stored session (don’t re-run).
+2. Preview payload + token spend (`--dry-run` + `--files-report`) only when that preview is actually useful.
+3. For browser runs, prefer the supervised wrapper in this skill instead of raw `oracle ...` launch commands.
+4. Use browser mode for the usual GPT‑5.4 Pro workflow; use API only when you explicitly want it.
+5. If the run detaches/timeouts: reattach to the stored session (don’t re-run).
 
 ## Commands (preferred)
 
@@ -56,7 +57,11 @@ Recommended defaults:
   - `oracle --dry-run summary --files-report -p "<task>" --file "src/**"`
 
 - Browser run (main path; long-running is normal):
-  - `oracle --engine browser --model gpt-5.2-pro -p "<task>" --file "src/**"`
+  - `python3 skills/oracle/scripts/oracle_supervise.py --output /root/clawd/output/<slug>.md --slug "<slug>" --prompt "<task>" --file "src/**"`
+  - This wrapper captures a raw log, preserves the slug, attempts one immediate `oracle session <slug> --render` recovery pass on failure/timeout, salvages from `~/.oracle/sessions/<slug>/output.log`, and refuses to report success unless the output file contains substantive answer text.
+
+- Raw Oracle run (only when you explicitly do not want supervision):
+  - `oracle --engine browser --model gpt-5.4-pro -p "<task>" --file "src/**"`
 
 - Manual paste fallback:
   - `oracle --render --copy -p "<task>" --file "src/**"`
@@ -81,6 +86,11 @@ Recommended defaults:
   - Dotfiles filtered unless opted in via pattern (e.g. `--file ".github/**"`).
   - Files > 1 MB rejected.
 
+## Model verification policy
+
+- **Oracle means GPT‑5.4 Pro. There is only one Oracle.**
+- After the run, verify that the active ChatGPT/browser model was actually GPT‑5.4 Pro. If the picker/session lands on a non-Pro model, or the model cannot be verified, treat the run as invalid.
+
 ## Engines (API vs browser)
 
 - Auto-pick: `api` when `OPENAI_API_KEY` is set; otherwise `browser`.
@@ -94,11 +104,25 @@ Recommended defaults:
 ## Sessions + slugs
 
 - Stored under `~/.oracle/sessions` (override with `ORACLE_HOME_DIR`).
-- Runs may detach or take a long time (browser + GPT‑5.2 Pro often does). If the CLI times out: don’t re-run; reattach.
+- Runs may detach or take a long time (browser + GPT‑5.4 Pro often does). If the CLI times out: don’t re-run; reattach.
   - List: `oracle status --hours 72`
   - Attach: `oracle session <id> --render`
 - Use `--slug "<3-5 words>"` to keep session IDs readable.
 - Duplicate prompt guard exists; use `--force` only when you truly want a fresh run.
+- The supervised wrapper also writes:
+  - `<output>.raw.log` — combined live stdout + recovery/render capture
+  - `<output>.oracle-job.json` — slug, command, session snapshot, delivery status
+
+### Recovery / operator runbook
+
+If a browser run behaves oddly, use this order:
+
+1. **Do not assume `running` means healthy.** Refresh with `oracle session <slug> --render` or the wrapper salvage mode.
+2. **Check the session artifact first:** `~/.oracle/sessions/<slug>/output.log`
+3. **Prefer salvage over rerun:**
+   - `python3 skills/oracle/scripts/oracle_supervise.py --salvage-only --slug "<slug>" --output /root/clawd/output/<slug>.md`
+4. **Trust delivery only after file verification.** A conversation URL, slug, or metadata-only file is not success.
+5. **Serialize Oracle browser jobs on this host** when practical.
 
 ## Prompt template (high signal)
 
