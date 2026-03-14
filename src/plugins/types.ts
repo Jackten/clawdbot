@@ -398,7 +398,13 @@ export type PluginHookAgentContext = {
   agentId?: string;
   sessionKey?: string;
   sessionId?: string;
+  /** Stable run identifier for the current attempt. */
+  runId?: string;
   workspaceDir?: string;
+  /** Final resolved provider for the current attempt. */
+  provider?: string;
+  /** Final resolved model for the current attempt. */
+  model?: string;
   messageProvider?: string;
   /** What initiated this agent run: "user", "heartbeat", "cron", or "memory". */
   trigger?: string;

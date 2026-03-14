@@ -19,6 +19,11 @@ import {
 import { discoverOpenClawPlugins } from "./discovery.js";
 import { initializeGlobalHookRunner } from "./hook-runner-global.js";
 import { loadPluginManifestRegistry } from "./manifest-registry.js";
+import {
+  createModelFamilyShimBeforePromptBuildHook,
+  MODEL_FAMILY_SHIM_HOOK_PRIORITY,
+  MODEL_FAMILY_SHIM_PLUGIN_ID,
+} from "./model-family-shims.js";
 import { isPathInside, safeStatSync } from "./path-safety.js";
 import { createPluginRegistry, type PluginRecord, type PluginRegistry } from "./registry.js";
 import { setActivePluginRegistry } from "./runtime.js";
@@ -500,11 +505,27 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
       return Reflect.getPrototypeOf(resolveRuntime() as object);
     },
   });
-  const { registry, createApi } = createPluginRegistry({
+  const { registry, createApi, registerTypedHook } = createPluginRegistry({
     logger,
     runtime,
     coreGatewayHandlers: options.coreGatewayHandlers as Record<string, GatewayRequestHandler>,
   });
+  const modelFamilyShimRecord = createPluginRecord({
+    id: MODEL_FAMILY_SHIM_PLUGIN_ID,
+    name: "Model Family Shims",
+    description: "Internal family-specific prompt shim hook",
+    source: "internal:model-family-shims",
+    origin: "config",
+    workspaceDir: options.workspaceDir,
+    enabled: true,
+    configSchema: false,
+  });
+  registerTypedHook(
+    modelFamilyShimRecord,
+    "before_prompt_build",
+    createModelFamilyShimBeforePromptBuildHook({ logger }),
+    { priority: MODEL_FAMILY_SHIM_HOOK_PRIORITY },
+  );
 
   const discovery = discoverOpenClawPlugins({
     workspaceDir: options.workspaceDir,

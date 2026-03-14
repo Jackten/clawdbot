@@ -78,6 +78,35 @@ describe("resolvePromptBuildHookResult", () => {
     expect(result.prependContext).toBe("from-hook");
   });
 
+  it("passes attempt-local provider, model, and runId through prompt-build hook context", async () => {
+    const hookCtx = {
+      provider: "openai",
+      model: "gpt-5.4",
+      runId: "run-1",
+      workspaceDir: "/tmp/openclaw-test",
+    };
+    const hookRunner = {
+      hasHooks: vi.fn(
+        (hookName: "before_prompt_build" | "before_agent_start") =>
+          hookName === "before_prompt_build",
+      ),
+      runBeforePromptBuild: vi.fn(async () => undefined),
+      runBeforeAgentStart: vi.fn(async () => undefined),
+    };
+
+    await resolvePromptBuildHookResult({
+      prompt: "hello",
+      messages: [],
+      hookCtx,
+      hookRunner,
+    });
+
+    expect(hookRunner.runBeforePromptBuild).toHaveBeenCalledWith(
+      { prompt: "hello", messages: [] },
+      hookCtx,
+    );
+  });
+
   it("merges prompt-build and legacy context fields in deterministic order", async () => {
     const hookRunner = {
       hasHooks: vi.fn(() => true),
