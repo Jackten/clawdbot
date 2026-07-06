@@ -115,6 +115,9 @@ type ShortTermPromotionDreamingConfig = {
   maxAgeDays?: number;
   maxPromotedSnippetTokens?: number;
   verboseLogging: boolean;
+  humanReadable?: {
+    enabled: boolean;
+  };
   storage?: {
     mode: "inline" | "separate" | "both";
     separateReports: boolean;
@@ -404,6 +407,7 @@ export function resolveShortTermPromotionDreamingConfig(params: {
     maxPromotedSnippetTokens:
       resolved.maxPromotedSnippetTokens ?? DEFAULT_MEMORY_DREAMING_MAX_PROMOTED_SNIPPET_TOKENS,
     verboseLogging: resolved.verboseLogging,
+    ...(!resolved.humanReadable.enabled ? { humanReadable: resolved.humanReadable } : {}),
     storage: resolved.storage,
     ...(resolved.execution.model ? { execution: { model: resolved.execution.model } } : {}),
   };
@@ -661,7 +665,10 @@ export async function runShortTermDreamingPromotionIfTriggered(params: {
         storage: params.config.storage ?? { mode: "separate", separateReports: false },
       });
       // Generate dream diary narrative from promoted memories.
-      if (candidates.length > 0 || applied.applied > 0) {
+      if (
+        params.config.humanReadable?.enabled !== false &&
+        (candidates.length > 0 || applied.applied > 0)
+      ) {
         const data: NarrativePhaseData = {
           phase: "deep",
           snippets: candidates.map((c) => c.snippet).filter(Boolean),
@@ -783,6 +790,7 @@ export function registerShortTermPromotionDreaming(api: OpenClawPluginApi): void
       String(config.recencyHalfLifeDays ?? ""),
       String(config.maxAgeDays ?? ""),
       config.verboseLogging ? "verbose" : "quiet",
+      config.humanReadable?.enabled === false ? "machine-only" : "human-readable",
       config.storage?.mode ?? "",
       config.storage?.separateReports ? "separate" : "inline",
     ].join("|");

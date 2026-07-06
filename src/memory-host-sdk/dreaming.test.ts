@@ -19,6 +19,9 @@ describe("memory dreaming host helpers", () => {
           frequency: "0 */4 * * *",
           timezone: "Europe/London",
           model: " anthropic/claude-sonnet-4-6 ",
+          humanReadable: {
+            enabled: false,
+          },
           storage: {
             mode: "both",
             separateReports: true,
@@ -41,6 +44,7 @@ describe("memory dreaming host helpers", () => {
     expect(resolved.frequency).toBe("0 */4 * * *");
     expect(resolved.timezone).toBe("Europe/London");
     expect(resolved.execution.defaults.model).toBe("anthropic/claude-sonnet-4-6");
+    expect(resolved.humanReadable).toEqual({ enabled: false });
     expect(resolved.phases.light.execution.model).toBe("anthropic/claude-sonnet-4-6");
     expect(resolved.phases.deep.execution.model).toBe("anthropic/claude-sonnet-4-6");
     expect(resolved.phases.rem.execution.model).toBe("anthropic/claude-sonnet-4-6");

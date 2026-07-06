@@ -2580,6 +2580,67 @@ describe("short-term dreaming trigger", () => {
     expect(subagent.run.mock.calls[0]?.[0]?.model).toBe("anthropic/claude-sonnet-4-6");
   });
 
+  it("keeps managed cron dreaming machine-only when human-readable output is disabled", async () => {
+    const logger = createLogger();
+    const workspaceDir = await createTempWorkspace("memory-dreaming-cron-machine-only-");
+    await writeDailyMemoryNote(workspaceDir, "2026-04-02", ["Move backups to S3 Glacier."]);
+
+    await recordShortTermRecalls({
+      workspaceDir,
+      query: "backup policy",
+      results: [
+        {
+          path: "memory/2026-04-02.md",
+          startLine: 1,
+          endLine: 1,
+          score: 0.9,
+          snippet: "Move backups to S3 Glacier.",
+          source: "memory",
+        },
+      ],
+    });
+
+    const subagent = {
+      run: vi.fn(async () => ({ runId: "narrative-run-1" })),
+      waitForRun: vi.fn(async () => ({ status: "ok" })),
+      getSessionMessages: vi.fn(async () => ({
+        messages: [{ role: "assistant", content: "A diary entry." }],
+      })),
+      deleteSession: vi.fn(async () => {}),
+    };
+
+    const result = await runShortTermDreamingPromotionIfTriggered({
+      cleanedBody: constants.DREAMING_SYSTEM_EVENT_TEXT,
+      trigger: "cron",
+      workspaceDir,
+      config: {
+        enabled: true,
+        cron: constants.DEFAULT_DREAMING_CRON_EXPR,
+        limit: 10,
+        minScore: 0,
+        minRecallCount: 0,
+        minUniqueQueries: 0,
+        recencyHalfLifeDays: constants.DEFAULT_DREAMING_RECENCY_HALF_LIFE_DAYS,
+        verboseLogging: false,
+        humanReadable: {
+          enabled: false,
+        },
+      },
+      logger,
+      subagent,
+    });
+
+    expect(result?.handled).toBe(true);
+    await expect(fs.readFile(path.join(workspaceDir, "MEMORY.md"), "utf-8")).resolves.toContain(
+      "Move backups to S3 Glacier.",
+    );
+    expect(subagent.run).not.toHaveBeenCalled();
+    const dreamsText = await fs.readFile(path.join(workspaceDir, "DREAMS.md"), "utf-8");
+    expect(dreamsText).toContain("## Deep Sleep");
+    expect(dreamsText).not.toContain("<!-- openclaw:dreaming:diary:start -->");
+    expect(dreamsText).not.toContain("A diary entry.");
+  });
+
   it("skips dreaming promotion cleanly when limit is zero", async () => {
     const logger = createLogger();
     const workspaceDir = await createTempWorkspace("memory-dreaming-limit-zero-");

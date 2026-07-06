@@ -53,6 +53,7 @@ type Logger = Pick<OpenClawPluginApi["logger"], "info" | "warn" | "error">;
 type DreamingHostConfig = unknown;
 type DreamingPhaseStorageConfig = {
   timezone?: string;
+  humanReadable?: { enabled: boolean };
   storage: { mode: "inline" | "separate" | "both"; separateReports: boolean };
   execution?: { model?: string };
 };
@@ -1738,7 +1739,7 @@ async function runLightDreaming(params: {
     );
   }
   // Generate dream diary narrative from the staged entries.
-  if (params.subagent && capped.length > 0) {
+  if (params.config.humanReadable?.enabled !== false && params.subagent && capped.length > 0) {
     const themes = uniqueStrings(capped.flatMap((e) => e.conceptTags).filter(Boolean));
     const data: NarrativePhaseData = {
       phase: "light",

@@ -362,6 +362,75 @@ describe("memory-core dreaming phases", () => {
     expect(subagent.deleteSession).toHaveBeenNthCalledWith(2, { sessionKey: expectedSessionKey });
   });
 
+  it("does not write dream diary narratives when human-readable output is disabled", async () => {
+    const workspaceDir = await createDreamingWorkspace();
+    await writeDailyNote(workspaceDir, [
+      `# ${DREAMING_TEST_DAY}`,
+      "",
+      "- Move backups to S3 Glacier.",
+      "- Keep retention at 365 days.",
+    ]);
+    const testConfig: OpenClawConfig = {
+      ...LIGHT_DREAMING_TEST_CONFIG,
+      agents: {
+        defaults: {
+          workspace: workspaceDir,
+          userTimezone: "UTC",
+        },
+      },
+      plugins: {
+        entries: {
+          "memory-core": {
+            config: {
+              dreaming: {
+                enabled: true,
+                timezone: "UTC",
+                humanReadable: {
+                  enabled: false,
+                },
+                phases: {
+                  light: {
+                    enabled: true,
+                    limit: 20,
+                    lookbackDays: 2,
+                  },
+                  rem: {
+                    enabled: false,
+                    limit: 0,
+                    lookbackDays: 2,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const subagent = createMockNarrativeSubagent("The archive hummed softly.");
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+
+    await runDreamingSweepPhases({
+      workspaceDir,
+      cfg: testConfig,
+      pluginConfig: resolveMemoryCorePluginConfig(testConfig),
+      logger,
+      subagent,
+      nowMs: Date.parse("2026-04-05T10:05:00.000Z"),
+    });
+
+    expect(subagent.run).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(workspaceDir, "DREAMS.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      fs.access(path.join(workspaceDir, "memory", "dreaming", "light", "2026-04-05.md")),
+    ).resolves.toBeUndefined();
+  });
+
   it("suppresses cleanup warnings during request-scoped narrative fallback", async () => {
     const workspaceDir = await createDreamingWorkspace();
     await writeDailyNote(workspaceDir, [

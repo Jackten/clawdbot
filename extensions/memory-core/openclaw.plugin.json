@@ -54,6 +54,15 @@
           "verboseLogging": {
             "type": "boolean"
           },
+          "humanReadable": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          },
           "storage": {
             "type": "object",
             "additionalProperties": false,
