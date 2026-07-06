@@ -195,6 +195,38 @@ describe("durable inbound reply delivery", () => {
     expect(latestSendDurableMessageBatchRequest().requireUnknownSendReconciliation).toBe(true);
   });
 
+  it("preserves explicit durable suppression reasons", async () => {
+    mocks.sendDurableMessageBatch.mockResolvedValueOnce({
+      status: "suppressed",
+      results: [],
+      receipt: {
+        platformMessageIds: [],
+        parts: [],
+        sentAt: 1,
+      },
+      reason: "cancelled_by_message_sending_hook",
+    });
+
+    const result = await deliverInboundReplyWithMessageSendContext({
+      cfg: {},
+      channel: "telegram",
+      agentId: "main",
+      info: { kind: "final" },
+      payload: { text: "final" },
+      ctxPayload: ctxPayload({
+        OriginatingTo: "chat-1",
+      }),
+    });
+
+    expect(result).toMatchObject({
+      status: "handled_no_send",
+      reason: "cancelled_by_message_sending_hook",
+      delivery: {
+        visibleReplySent: false,
+      },
+    });
+  });
+
   it("reports durable partial send failures as failed delivery", async () => {
     const error = new Error("second chunk failed");
     mocks.sendDurableMessageBatch.mockResolvedValueOnce({

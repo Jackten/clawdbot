@@ -227,6 +227,44 @@ describe("dispatchReplyFromConfig reply_dispatch hook", () => {
     expect(sessionStoreMocks.currentEntry?.pendingFinalDeliveryContext).toBeUndefined();
   });
 
+  it("falls back to dispatcher delivery when routed final delivery has no visible result", async () => {
+    hookMocks.runner.hasHooks.mockReturnValue(false);
+    sessionStoreMocks.currentEntry = {
+      sessionKey: "agent:test:session",
+      pendingFinalDelivery: true,
+      pendingFinalDeliveryText: "durable reply",
+      pendingFinalDeliveryCreatedAt: 1,
+      pendingFinalDeliveryLastError: "previous failure",
+      pendingFinalDeliveryContext: { source: "heartbeat" },
+    };
+    sessionStoreMocks.resolveSessionStoreEntry.mockReturnValue({
+      existing: sessionStoreMocks.currentEntry,
+    });
+    mocks.routeReply.mockResolvedValueOnce({
+      ok: false,
+      fallbackToDispatcher: true,
+      reason: "no_visible_result",
+      error: "Routed reply produced no visible delivery result",
+    });
+    const dispatcher = createDispatcher();
+
+    const result = await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher,
+      replyResolver: async () => ({ text: "durable reply" }),
+    });
+
+    expect(mocks.routeReply).toHaveBeenCalledOnce();
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledOnce();
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith({ text: "durable reply" });
+    expect(result.queuedFinal).toBe(true);
+    expect(sessionStoreMocks.updateSessionStoreEntry).toHaveBeenCalledOnce();
+    expect(sessionStoreMocks.currentEntry?.pendingFinalDelivery).toBeUndefined();
+    expect(sessionStoreMocks.currentEntry?.pendingFinalDeliveryText).toBeUndefined();
+    expect(sessionStoreMocks.currentEntry?.pendingFinalDeliveryContext).toBeUndefined();
+  });
+
   it("clears pending final delivery when abort fires after a successful final send (#89115)", async () => {
     // Regression for #89115: an abort that lands after the final reply has
     // shipped (here, during sendFinalReply) must still clear the pending-final

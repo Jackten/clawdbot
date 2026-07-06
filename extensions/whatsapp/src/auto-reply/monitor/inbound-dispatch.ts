@@ -749,9 +749,13 @@ export async function dispatchWhatsAppBufferedReply(params: {
               return whatsAppReplyDeliveryVisibilityFromDurableResult(durable.delivery);
             }
             if (durable.status === "handled_no_send") {
-              return flushResult.delivered > 0
-                ? whatsAppReplyDeliveryVisibility(true)
-                : whatsAppReplyDeliveryVisibilityFromDurableResult(durable.delivery);
+              if (flushResult.delivered > 0) {
+                return whatsAppReplyDeliveryVisibility(true);
+              }
+              if (durable.reason !== "no_visible_result") {
+                return whatsAppReplyDeliveryVisibilityFromDurableResult(durable.delivery);
+              }
+              return await deliverNormalizedPayload(normalizedDeliveryPayload, info);
             }
             const delivery = await deliverNormalizedPayload(normalizedDeliveryPayload, info);
             return flushResult.delivered > 0 && !delivery.visibleReplySent

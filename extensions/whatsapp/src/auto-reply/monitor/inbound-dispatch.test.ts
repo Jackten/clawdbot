@@ -802,10 +802,53 @@ describe("whatsapp inbound dispatch", () => {
     expect(deliverReply).not.toHaveBeenCalled();
   });
 
-  it("does not fall back when durable WhatsApp delivery suppresses a send", async () => {
+  it("falls back to direct WhatsApp delivery when durable final delivery has no visible result", async () => {
     deliverInboundReplyWithMessageSendContextMock.mockResolvedValueOnce({
       status: "handled_no_send",
       reason: "no_visible_result",
+      delivery: {
+        messageIds: [],
+        visibleReplySent: false,
+      },
+    });
+    const deliverReply = vi.fn(async () => acceptedDeliveryResult());
+    const rememberSentText = vi.fn();
+
+    await dispatchBufferedReply({
+      deliverReply,
+      rememberSentText,
+    });
+
+    const deliver = getCapturedDeliver();
+    expect(await deliver?.({ text: "final payload" }, { kind: "final" })).toMatchObject({
+      visibleReplySent: true,
+    });
+
+    const durableParams = requireMockArg(
+      deliverInboundReplyWithMessageSendContextMock,
+      0,
+      0,
+      "no visible durable delivery params",
+    );
+    expectRecordFields(durableParams, {
+      channel: "whatsapp",
+      info: { kind: "final" },
+    });
+    expectRecordFields(requireRecord(durableParams.payload, "no visible payload"), {
+      text: "final payload",
+    });
+    expect(deliverReply).toHaveBeenCalledTimes(1);
+    expectReplyResultFields(deliverReply, { text: "final payload" });
+    expectRememberSentContextFields(rememberSentText, "final payload", {
+      combinedBody: "hi",
+      combinedBodySessionKey: "agent:main:whatsapp:direct:+1000",
+    });
+  });
+
+  it("does not fall back when durable WhatsApp delivery explicitly suppresses a send", async () => {
+    deliverInboundReplyWithMessageSendContextMock.mockResolvedValueOnce({
+      status: "handled_no_send",
+      reason: "cancelled_by_message_sending_hook",
       delivery: {
         messageIds: [],
         visibleReplySent: false,
