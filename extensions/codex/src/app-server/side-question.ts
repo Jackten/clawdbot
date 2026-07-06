@@ -830,6 +830,7 @@ async function createCodexSideToolBridge(input: {
       abortSignal: input.signal,
       modelProvider: runtimeModel.provider,
       modelId: input.params.model,
+      thinkingLevel: input.params.resolvedThinkLevel ?? "off",
       modelCompat:
         runtimeModel.compat && typeof runtimeModel.compat === "object"
           ? (runtimeModel.compat as never)

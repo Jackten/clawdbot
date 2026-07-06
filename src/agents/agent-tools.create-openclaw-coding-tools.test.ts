@@ -774,6 +774,24 @@ describe("createOpenClawCodingTools", () => {
     }
   });
 
+  it("forwards active model metadata to OpenClaw tool construction", () => {
+    const createOpenClawToolsMock = vi.mocked(createOpenClawTools);
+    createOpenClawToolsMock.mockClear();
+
+    createOpenClawCodingTools({
+      config: testConfig,
+      modelProvider: "openai-codex",
+      modelId: "gpt-5.5",
+      thinkingLevel: "low",
+      forceMessageTool: true,
+    });
+
+    const options = latestCreateOpenClawToolsOptions();
+    expect(options.modelProvider).toBe("openai-codex");
+    expect(options.modelId).toBe("gpt-5.5");
+    expect(options.thinkingLevel).toBe("low");
+  });
+
   it("uses tools.alsoAllow for optional plugin discovery without widening to all plugins", () => {
     const createOpenClawToolsMock = vi.mocked(createOpenClawTools);
     createOpenClawToolsMock.mockClear();

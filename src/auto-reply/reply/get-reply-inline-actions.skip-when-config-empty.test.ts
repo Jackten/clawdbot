@@ -879,6 +879,7 @@ describe("handleInlineActions", () => {
         overrides: {
           cfg: { commands: { text: true } },
           allowTextCommands: true,
+          resolvedThinkLevel: "high",
           skillCommands,
         },
       }),
@@ -887,6 +888,7 @@ describe("handleInlineActions", () => {
     expect(result).toEqual({ kind: "reply", reply: { text: "✅ Done." } });
     const toolsArgs = mockObjectArg(createOpenClawToolsMock, "createOpenClawTools");
     expect(toolsArgs).not.toHaveProperty("senderIsOwner");
+    expect(toolsArgs.thinkingLevel).toBe("high");
     expect(toolsArgs.beforeToolCallHookContext).toMatchObject({
       cwd: "/tmp",
       workspaceDir: "/tmp",

@@ -444,6 +444,8 @@ export function createOpenClawCodingTools(options?: {
   modelProvider?: string;
   /** Model id for the current provider (used for model-specific tool gating). */
   modelId?: string;
+  /** Active thinking level for response-prefix templates and visible tool replies. */
+  thinkingLevel?: string;
   /** Model API for the current provider (used for provider-native tool arbitration). */
   modelApi?: string;
   /** Model context window in tokens (used to scale read-tool output budget). */
@@ -1023,6 +1025,7 @@ export function createOpenClawCodingTools(options?: {
           hasCurrentInboundAudio: options?.hasCurrentInboundAudio,
           modelProvider: options?.modelProvider,
           modelId: options?.modelId,
+          thinkingLevel: options?.thinkingLevel,
           replyToMode: options?.replyToMode,
           hasRepliedRef: options?.hasRepliedRef,
           modelHasVision: options?.modelHasVision,

@@ -657,7 +657,13 @@ export function createSessionsSendTool(opts?: {
       // Reflect that in the metadata so the parent LLM does not wait for a
       // second result that will never arrive.
       const delivery = skipA2AFlow
-        ? ({ status: "skipped", mode: "announce" } as const)
+        ? ({
+            status: "skipped",
+            mode: "announce",
+            reason: "parent_owned_subagent_inline_reply",
+            nextAction:
+              "Reply was returned inline only; no channel delivery was attempted. If it answers the current user/source conversation, deliver it in your final response or with message/media.",
+          } as const)
         : ({ status: "pending", mode: "announce" } as const);
 
       const startA2AFlow = (

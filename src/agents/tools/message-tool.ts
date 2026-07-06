@@ -14,6 +14,7 @@ import {
   GATEWAY_CLIENT_MODES,
 } from "../../../packages/gateway-protocol/src/client-info.js";
 import type { SourceReplyDeliveryMode } from "../../auto-reply/get-reply-options.types.js";
+import { resolveResponsePrefixTemplate } from "../../auto-reply/reply/response-prefix-template.js";
 import {
   hasInboundMetadataSentinel,
   stripInboundMetadata,
@@ -34,6 +35,7 @@ import {
 import { CHANNEL_MESSAGE_ACTION_NAMES } from "../../channels/plugins/message-action-names.js";
 import type { ChannelMessageCapability } from "../../channels/plugins/message-capabilities.js";
 import type { ChannelMessageActionName } from "../../channels/plugins/types.public.js";
+import { createReplyPrefixContext } from "../../channels/reply-prefix.js";
 import { resolveCommandSecretRefsViaGateway } from "../../cli/command-secret-gateway.js";
 import { getScopedChannelsCommandSecretTargets } from "../../cli/command-secret-targets.js";
 import { resolveMessageSecretScope } from "../../cli/message-secret-scope.js";
@@ -900,6 +902,9 @@ type MessageToolOptions = {
   inboundEventKind?: InboundEventKind;
   requesterSenderId?: string;
   senderIsOwner?: boolean;
+  modelProvider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
 };
 
 type MessageToolDiscoveryParams = {
@@ -1050,6 +1055,58 @@ function resolveMessageToolActionSchemaActions(params: MessageToolDiscoveryParam
 function listAllMessageToolActions(params: MessageToolDiscoveryParams): ChannelMessageActionName[] {
   const pluginActions = listAllChannelSupportedActions(buildMessageActionDiscoveryInput(params));
   return uniqueValues<ChannelMessageActionName>(["send", "broadcast", ...pluginActions]);
+}
+
+function applyResponsePrefixToMessageToolSend(params: {
+  cfg: OpenClawConfig;
+  action: ChannelMessageActionName;
+  toolParams: Record<string, unknown>;
+  agentId?: string;
+  channel?: string;
+  accountId?: string;
+  modelProvider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
+}) {
+  if (params.action !== "send" || params.toolParams.dryRun === true) {
+    return;
+  }
+  const field = ["message", "content", "text", "caption"].find((candidate) => {
+    const value = params.toolParams[candidate];
+    return typeof value === "string" && value.trim().length > 0;
+  });
+  if (!field) {
+    return;
+  }
+
+  const agentId = params.agentId ?? resolveSessionAgentId({ config: params.cfg });
+  const replyPrefix = createReplyPrefixContext({
+    cfg: params.cfg,
+    agentId,
+    channel: params.channel,
+    accountId: params.accountId,
+  });
+  if (params.modelProvider && params.modelId) {
+    replyPrefix.onModelSelected({
+      provider: params.modelProvider,
+      model: params.modelId,
+      thinkLevel: params.thinkingLevel,
+    });
+  }
+  const effectivePrefix = resolveResponsePrefixTemplate(
+    replyPrefix.responsePrefix,
+    replyPrefix.responsePrefixContextProvider(),
+  );
+  if (!effectivePrefix) {
+    return;
+  }
+
+  const text = params.toolParams[field] as string;
+  if (!text.startsWith(effectivePrefix)) {
+    params.toolParams[field] = effectivePrefix.endsWith(" ")
+      ? `${effectivePrefix}${text}`
+      : `${effectivePrefix} ${text}`;
+  }
 }
 
 function resolveIncludeCapability(
@@ -1425,6 +1482,17 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
           }
         }
       }
+      applyResponsePrefixToMessageToolSend({
+        cfg,
+        action,
+        toolParams: params,
+        agentId: resolvedAgentId,
+        channel: scope.channel,
+        accountId: scope.accountId ?? accountId ?? undefined,
+        modelProvider: options?.modelProvider,
+        modelId: options?.modelId,
+        thinkingLevel: options?.thinkingLevel,
+      });
 
       const gatewayResolved = resolveGatewayOptions(gatewayOpts);
       const gateway = {

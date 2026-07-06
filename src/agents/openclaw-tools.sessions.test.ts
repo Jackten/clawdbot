@@ -203,6 +203,8 @@ type SessionsSendDetails = {
   delivery?: {
     status?: string;
     mode?: string;
+    reason?: string;
+    nextAction?: string;
   };
 };
 
@@ -2103,6 +2105,8 @@ describe("sessions tools", () => {
     expect(waitedDetails.reply).toBe("child reply");
     expect(waitedDetails.delivery?.status).toBe("skipped");
     expect(waitedDetails.delivery?.mode).toBe("announce");
+    expect(waitedDetails.delivery?.reason).toBe("parent_owned_subagent_inline_reply");
+    expect(waitedDetails.delivery?.nextAction).toContain("no channel delivery was attempted");
     expect(countMatching(calls, (call) => call.method === "agent")).toBe(1);
     const replyPromptAgentCalls = calls.filter(
       (call) =>

@@ -137,6 +137,8 @@ export function createOpenClawTools(
     modelProvider?: string;
     /** Active model id for provider/model-specific tool gating. */
     modelId?: string;
+    /** Active thinking level for response-prefix templates and visible tool replies. */
+    thinkingLevel?: string;
     /**
      * Ring-zero Crestodian setup tool. Only the Crestodian agent runner sets
      * this; normal agents must never receive it (wildcard allowlists included).
@@ -372,6 +374,9 @@ export function createOpenClawTools(
         inboundEventKind: options?.inboundEventKind,
         requesterSenderId: options?.requesterSenderId ?? undefined,
         senderIsOwner: options?.senderIsOwner,
+        modelProvider: options?.modelProvider,
+        modelId: options?.modelId,
+        thinkingLevel: options?.thinkingLevel,
       });
   const heartbeatTool = options?.enableHeartbeatTool ? createHeartbeatResponseTool() : null;
   options?.recordToolPrepStage?.("openclaw-tools:message-tool");

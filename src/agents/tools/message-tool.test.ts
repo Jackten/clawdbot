@@ -3196,6 +3196,120 @@ describe("message tool internal-runtime-context sanitization", () => {
   });
 });
 
+describe("message tool response prefix", () => {
+  it("applies configured responsePrefix templates to visible sends", async () => {
+    mockSendResult({ channel: "whatsapp", to: "120363@g.us" });
+
+    const call = await executeSend({
+      toolOptions: {
+        config: {
+          messages: { responsePrefix: "[{provider}/{model} | think:{think}]" },
+        } as never,
+        currentChannelProvider: "whatsapp",
+        agentSessionKey: "agent:legend-education:whatsapp:group:120363@g.us",
+        modelProvider: "openai-codex",
+        modelId: "gpt-5.5",
+        thinkingLevel: "low",
+      },
+      action: {
+        message: "Visible reply",
+      },
+    });
+
+    expect(call?.params?.message).toBe("[openai-codex/gpt-5.5 | think:low] Visible reply");
+  });
+
+  it("matches reply prefix context for identity names and short model names", async () => {
+    mockSendResult({ channel: "whatsapp", to: "120363@g.us" });
+
+    const call = await executeSend({
+      toolOptions: {
+        config: {
+          messages: { responsePrefix: "[{identity.name} {model}]" },
+          agents: {
+            list: [{ id: "legend-education", identity: { name: "Legend Education" } }],
+          },
+        } as never,
+        currentChannelProvider: "whatsapp",
+        agentSessionKey: "agent:legend-education:whatsapp:group:120363@g.us",
+        modelProvider: "anthropic",
+        modelId: "claude-opus-4-6-20260205",
+      },
+      action: {
+        message: "Visible reply",
+      },
+    });
+
+    expect(call?.params?.message).toBe("[Legend Education claude-opus-4-6] Visible reply");
+  });
+
+  it("applies configured responsePrefix templates to caption-only sends", async () => {
+    mockSendResult({ channel: "whatsapp", to: "120363@g.us" });
+
+    const call = await executeSend({
+      toolOptions: {
+        config: {
+          messages: { responsePrefix: "[{modelFull}] " },
+        } as never,
+        currentChannelProvider: "whatsapp",
+        modelProvider: "openai-codex",
+        modelId: "gpt-5.5",
+      },
+      action: {
+        mediaUrl: "file:///tmp/chart.png",
+        caption: "Visible caption",
+      },
+    });
+
+    expect(call?.params?.caption).toBe("[openai-codex/gpt-5.5] Visible caption");
+  });
+
+  it("does not duplicate an existing responsePrefix", async () => {
+    mockSendResult({ channel: "whatsapp", to: "120363@g.us" });
+
+    const call = await executeSend({
+      toolOptions: {
+        config: {
+          messages: { responsePrefix: "[{provider}/{model} | think:{think}]" },
+        } as never,
+        currentChannelProvider: "whatsapp",
+        modelProvider: "venice",
+        modelId: "kimi-k2-6",
+        thinkingLevel: "low",
+      },
+      action: {
+        message: "[venice/kimi-k2-6 | think:low] Already prefixed",
+      },
+    });
+
+    expect(call?.params?.message).toBe("[venice/kimi-k2-6 | think:low] Already prefixed");
+  });
+
+  it("uses session-derived delivery channel when current channel is webchat", async () => {
+    mockSendResult({ channel: "whatsapp", to: "120363@g.us" });
+
+    const call = await executeSend({
+      toolOptions: {
+        config: {
+          messages: { responsePrefix: "[Global] " },
+          channels: {
+            whatsapp: { responsePrefix: "[WA {modelFull}] " },
+          },
+        } as never,
+        currentChannelProvider: "webchat",
+        agentSessionKey: "agent:legend-education:whatsapp:group:120363@g.us",
+        modelProvider: "openai-codex",
+        modelId: "gpt-5.5",
+      },
+      action: {
+        message: "Visible reply",
+      },
+    });
+
+    expect(call?.params?.message).toBe("[WA openai-codex/gpt-5.5] Visible reply");
+  });
+});
+
 describe("message tool sandbox passthrough", () => {
   it.each([
     {

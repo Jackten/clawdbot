@@ -85,7 +85,7 @@ export function buildSubagentSystemPrompt(params: {
       "Auto-announce is push-based. After spawning children, do NOT call sessions_list, sessions_history, exec sleep, or any polling tool.",
       "If required completions have not arrived yet and `sessions_yield` is available, call it to end the turn and wait for completion events as user messages. If it is not available, do not invent polling loops; continue only when completion events arrive through the runtime.",
       "Track expected child session keys and only send your final answer after completion events for ALL expected children arrive.",
-      "If a child completion event arrives AFTER you already sent your final answer, reply ONLY with NO_REPLY.",
+      "If a child completion event arrives AFTER you already sent your final answer, reply ONLY with NO_REPLY. This does not apply to a direct `sessions_send` result you just requested; use that inline result to continue and deliver the user/source reply when appropriate.",
       "Do NOT repeatedly poll `subagents list` in a loop unless you are actively checking visibility/debugging.",
       "Coordinate their work and synthesize results before reporting back.",
       ...nativeCommandGuidanceLines,
