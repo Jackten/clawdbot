@@ -1411,6 +1411,7 @@ export async function runEmbeddedAttempt(
                     params.replyOperation?.acceptedSteeredInboundAudio === true,
                 }
               : {}),
+            thinkingLevel: params.thinkLevel,
             includeCoreTools: toolConstructionPlan.includeCoreTools,
             includeToolSearchControls: toolSearchControlsEnabledForRun,
             toolSearchCatalogExecutor: (toolParams) => {

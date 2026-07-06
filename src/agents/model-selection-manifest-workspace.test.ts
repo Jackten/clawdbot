@@ -5,6 +5,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 const loadManifestMetadataSnapshotMock = vi.hoisted(() => vi.fn());
 const getCurrentPluginMetadataSnapshotMock = vi.hoisted(() => vi.fn());
 const getActivePluginRegistryWorkspaceDirFromStateMock = vi.hoisted(() => vi.fn());
+const normalizeProviderModelIdWithRuntimeMock = vi.hoisted(() => vi.fn(() => undefined));
 
 vi.mock("../plugins/current-plugin-metadata-snapshot.js", () => ({
   getCurrentPluginMetadataSnapshot: getCurrentPluginMetadataSnapshotMock,
@@ -19,7 +20,7 @@ vi.mock("../plugins/runtime-state.js", () => ({
 }));
 
 vi.mock("./provider-model-normalization.runtime.js", () => ({
-  normalizeProviderModelIdWithRuntime: () => undefined,
+  normalizeProviderModelIdWithRuntime: normalizeProviderModelIdWithRuntimeMock,
 }));
 
 describe("configured model manifest workspace scope", () => {
@@ -28,6 +29,7 @@ describe("configured model manifest workspace scope", () => {
     loadManifestMetadataSnapshotMock.mockReset();
     getCurrentPluginMetadataSnapshotMock.mockReset();
     getActivePluginRegistryWorkspaceDirFromStateMock.mockReset();
+    normalizeProviderModelIdWithRuntimeMock.mockClear();
     getCurrentPluginMetadataSnapshotMock.mockReturnValue(undefined);
     loadManifestMetadataSnapshotMock.mockReturnValue({
       plugins: [
@@ -361,5 +363,189 @@ describe("configured model manifest workspace scope", () => {
       }),
     ).toEqual({ provider: "openrouter", model: "openrouter/auto" });
     expect(loadManifestMetadataSnapshotMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not normalize every alias entry for provider-qualified primary models", async () => {
+    const { resolveConfiguredModelRef } = await import("./model-selection-shared.js");
+    const models: Record<string, { alias: string }> = {};
+    for (let index = 0; index < 50; index += 1) {
+      models[`venice/model-${index}`] = { alias: `v${index}` };
+    }
+    const cfg = {
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-5.5" },
+          models,
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    expect(
+      resolveConfiguredModelRef({
+        cfg,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.4",
+      }),
+    ).toEqual({ provider: "openai", model: "gpt-5.5" });
+    expect(normalizeProviderModelIdWithRuntimeMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps manifest normalization for provider-qualified primary models", async () => {
+    loadManifestMetadataSnapshotMock.mockReturnValue({
+      plugins: [
+        {
+          modelIdNormalization: {
+            providers: {
+              xai: {
+                aliases: {
+                  "grok-4.20-experimental-beta-0304-reasoning": "grok-4.20-beta-latest-reasoning",
+                },
+              },
+            },
+          },
+        },
+      ],
+    });
+    const { resolveConfiguredModelRef } = await import("./model-selection-shared.js");
+    const cfg = {
+      agents: {
+        defaults: {
+          model: { primary: "xai/grok-4.20-experimental-beta-0304-reasoning" },
+          models: {
+            "venice/model-a": { alias: "a" },
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    expect(
+      resolveConfiguredModelRef({
+        cfg,
+        defaultProvider: "xai",
+        defaultModel: "grok-4.20",
+      }),
+    ).toEqual({ provider: "xai", model: "grok-4.20-beta-latest-reasoning" });
+    expect(normalizeProviderModelIdWithRuntimeMock).not.toHaveBeenCalled();
+    expect(loadManifestMetadataSnapshotMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still resolves exact configured aliases without normalizing non-matching aliases", async () => {
+    const { resolveConfiguredModelRef } = await import("./model-selection-shared.js");
+    const cfg = {
+      agents: {
+        defaults: {
+          model: { primary: "target" },
+          models: {
+            "venice/model-a": { alias: "a" },
+            "openai/gpt-5.5": { alias: "target" },
+            "venice/model-b": { alias: "b" },
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    expect(
+      resolveConfiguredModelRef({
+        cfg,
+        defaultProvider: "anthropic",
+        defaultModel: "claude-sonnet-4-6",
+      }),
+    ).toEqual({ provider: "openai", model: "gpt-5.5" });
+    expect(normalizeProviderModelIdWithRuntimeMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the last valid configured alias when a later duplicate alias is invalid", async () => {
+    const { resolveConfiguredModelRef } = await import("./model-selection-shared.js");
+    const cfg = {
+      agents: {
+        defaults: {
+          model: { primary: "target" },
+          models: {
+            "openai/gpt-5.5": { alias: "target" },
+            "openai/": { alias: "target" },
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    expect(
+      resolveConfiguredModelRef({
+        cfg,
+        defaultProvider: "anthropic",
+        defaultModel: "claude-sonnet-4-6",
+      }),
+    ).toEqual({ provider: "openai", model: "gpt-5.5" });
+    expect(normalizeProviderModelIdWithRuntimeMock).not.toHaveBeenCalled();
+  });
+
+  it("honors explicit runtime plugin normalization opt-in for configured defaults", async () => {
+    normalizeProviderModelIdWithRuntimeMock.mockImplementation(({ provider, context }) => {
+      if (provider === "custom-provider" && context.modelId === "legacy-model") {
+        return "modern-model";
+      }
+      return undefined;
+    });
+    const { resolveConfiguredModelRef } = await import("./model-selection-shared.js");
+    const cfg = {
+      agents: {
+        defaults: {
+          model: { primary: "custom-provider/legacy-model" },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    expect(
+      resolveConfiguredModelRef({
+        cfg,
+        defaultProvider: "anthropic",
+        defaultModel: "claude-sonnet-4-6",
+        allowPluginNormalization: true,
+      }),
+    ).toEqual({ provider: "custom-provider", model: "modern-model" });
+    expect(normalizeProviderModelIdWithRuntimeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("builds alias indexes without runtime plugin normalization", async () => {
+    const { buildModelAliasIndex } = await import("./model-selection-shared.js");
+    const cfg = {
+      agents: {
+        defaults: {
+          models: {
+            "venice/model-a": { alias: "a" },
+            "openai/gpt-5.5": { alias: "target" },
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    const aliases = buildModelAliasIndex({ cfg, defaultProvider: "anthropic" });
+
+    expect(aliases.byAlias.get("target")?.ref).toEqual({
+      provider: "openai",
+      model: "gpt-5.5",
+    });
+    expect(normalizeProviderModelIdWithRuntimeMock).not.toHaveBeenCalled();
+  });
+
+  it("does not normalize configured model entries that do not define aliases", async () => {
+    const { buildModelAliasIndex } = await import("./model-selection-shared.js");
+    const cfg = {
+      agents: {
+        defaults: {
+          models: {
+            "anthropic/sonnet-4.6": {},
+            "openai/gpt-5.5": {},
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    const aliases = buildModelAliasIndex({ cfg, defaultProvider: "anthropic" });
+
+    expect(aliases.byAlias.size).toBe(0);
+    expect(aliases.byKey.size).toBe(0);
+    expect(normalizeProviderModelIdWithRuntimeMock).not.toHaveBeenCalled();
+    expect(getCurrentPluginMetadataSnapshotMock).not.toHaveBeenCalled();
+    expect(loadManifestMetadataSnapshotMock).not.toHaveBeenCalled();
   });
 });

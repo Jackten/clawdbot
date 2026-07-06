@@ -5,6 +5,7 @@ import type { ThinkLevel } from "../../../auto-reply/thinking.js";
 import { formatErrorMessage } from "../../../infra/errors.js";
 import type { Model } from "../../../llm/types.js";
 import { prepareProviderRuntimeAuth } from "../../../plugins/provider-runtime.js";
+import { collectProviderApiKeysForExecution } from "../../api-key-rotation.js";
 import {
   type AuthProfileStore,
   isProfileInCooldown,
@@ -42,6 +43,7 @@ import {
 import type { RunEmbeddedAgentParams } from "./params.js";
 
 type ApiKeyInfo = ResolvedProviderAuth;
+export type AuthAdvanceResult = false | "api_key" | "profile";
 
 type RuntimeApiKeySink = {
   setRuntimeApiKey(provider: string, apiKey: string): void;
@@ -89,6 +91,9 @@ export function createEmbeddedRunAuthController(params: {
   setThinkLevel(next: ThinkLevel): void;
   log: LogLike;
 }) {
+  let apiKeyRotationKeys: string[] = [];
+  let apiKeyRotationIndex = 0;
+
   const applyPreparedRuntimeRequestOverrides = (paramsForApply: {
     runtimeModel: Model;
     preparedAuth: {
@@ -390,9 +395,35 @@ export function createEmbeddedRunAuthController(params: {
     });
   };
 
-  const applyApiKeyInfo = async (candidate?: string): Promise<void> => {
-    const apiKeyInfo = await resolveApiKeyForCandidate(candidate);
-    params.setApiKeyInfo(apiKeyInfo);
+  const resetApiKeyRotation = (): void => {
+    apiKeyRotationKeys = [];
+    apiKeyRotationIndex = 0;
+  };
+
+  const updateApiKeyRotation = (apiKeyInfo: ApiKeyInfo): void => {
+    if (apiKeyInfo.mode !== "api-key" || !apiKeyInfo.apiKey?.trim()) {
+      resetApiKeyRotation();
+      return;
+    }
+    const runtimeModel = params.getRuntimeModel();
+    const keys = collectProviderApiKeysForExecution({
+      provider: runtimeModel.provider,
+      primaryApiKey: apiKeyInfo.apiKey,
+    });
+    if (keys.length <= 1) {
+      resetApiKeyRotation();
+      return;
+    }
+    apiKeyRotationKeys = keys;
+    apiKeyRotationIndex = Math.max(0, keys.indexOf(apiKeyInfo.apiKey));
+  };
+
+  const applyResolvedApiKeyInfo = async (
+    apiKeyInfo: ApiKeyInfo,
+    candidate: string | undefined,
+    sourceApiKeyOverride?: string,
+  ): Promise<void> => {
+    const sourceApiKey = sourceApiKeyOverride ?? apiKeyInfo.apiKey;
     const resolvedProfileId = apiKeyInfo.profileId ?? candidate;
     if (!apiKeyInfo.apiKey) {
       if (apiKeyInfo.mode !== "aws-sdk") {
@@ -450,7 +481,7 @@ export function createEmbeddedRunAuthController(params: {
     const runtimeModel = params.getRuntimeModel();
     const preparedAuth = await prepareRuntimeAuthForModel({
       runtimeModel,
-      apiKey: apiKeyInfo.apiKey,
+      apiKey: sourceApiKey ?? apiKeyInfo.apiKey,
       authMode: apiKeyInfo.mode,
       profileId: apiKeyInfo.profileId,
     });
@@ -460,7 +491,7 @@ export function createEmbeddedRunAuthController(params: {
       params.authStorage.setRuntimeApiKey(runtimeModel.provider, preparedAuth.apiKey);
       params.setRuntimeAuthState({
         generation: nextRuntimeAuthGeneration(),
-        sourceApiKey: apiKeyInfo.apiKey,
+        sourceApiKey: sourceApiKey ?? apiKeyInfo.apiKey,
         authMode: apiKeyInfo.mode,
         profileId: apiKeyInfo.profileId,
         expiresAt: preparedAuth.expiresAt,
@@ -472,13 +503,48 @@ export function createEmbeddedRunAuthController(params: {
     }
     if (!runtimeAuthHandled) {
       clearRuntimeAuthRefreshTimer();
-      params.authStorage.setRuntimeApiKey(runtimeModel.provider, apiKeyInfo.apiKey);
+      params.authStorage.setRuntimeApiKey(runtimeModel.provider, sourceApiKey ?? apiKeyInfo.apiKey);
       params.setRuntimeAuthState(null);
     }
     params.setLastProfileId(apiKeyInfo.profileId);
   };
 
-  const advanceAuthProfile = async (): Promise<boolean> => {
+  const applyApiKeyInfo = async (candidate?: string): Promise<void> => {
+    const apiKeyInfo = await resolveApiKeyForCandidate(candidate);
+    params.setApiKeyInfo(apiKeyInfo);
+    updateApiKeyRotation(apiKeyInfo);
+    await applyResolvedApiKeyInfo(apiKeyInfo, candidate);
+  };
+
+  const advanceProviderApiKey = async (): Promise<"api_key" | false> => {
+    const apiKeyInfo = params.getApiKeyInfo();
+    if (!apiKeyInfo || apiKeyInfo.mode !== "api-key" || apiKeyRotationKeys.length <= 1) {
+      return false;
+    }
+    const nextIndex = apiKeyRotationIndex + 1;
+    if (nextIndex >= apiKeyRotationKeys.length) {
+      return false;
+    }
+    const nextApiKey = apiKeyRotationKeys[nextIndex];
+    apiKeyRotationIndex = nextIndex;
+    params.setThinkLevel(params.initialThinkLevel);
+    params.attemptedThinking.clear();
+    await applyResolvedApiKeyInfo(
+      apiKeyInfo,
+      params.profileCandidates[params.getProfileIndex()],
+      nextApiKey,
+    );
+    params.log.info(
+      `rotated API key for ${params.getProvider()}/${params.getModelId()} (${nextIndex + 1}/${apiKeyRotationKeys.length})`,
+    );
+    return "api_key";
+  };
+
+  const advanceAuthProfile = async (): Promise<AuthAdvanceResult> => {
+    const apiKeyAdvance = await advanceProviderApiKey();
+    if (apiKeyAdvance) {
+      return apiKeyAdvance;
+    }
     if (params.lockedProfileId) {
       return false;
     }
@@ -497,7 +563,7 @@ export function createEmbeddedRunAuthController(params: {
         params.setProfileIndex(nextIndex);
         params.setThinkLevel(params.initialThinkLevel);
         params.attemptedThinking.clear();
-        return true;
+        return "profile";
       } catch (err) {
         if (candidate && candidate === params.lockedProfileId) {
           throw err;
@@ -595,6 +661,7 @@ export function createEmbeddedRunAuthController(params: {
 
   return {
     advanceAuthProfile,
+    advanceProviderApiKey,
     initializeAuthProfile,
     maybeRefreshRuntimeAuthForAuthError,
     stopRuntimeAuthRefreshTimer,

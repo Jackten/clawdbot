@@ -27,7 +27,7 @@ type AssistantFailoverOutcome =
       action: "retry";
       overloadProfileRotations: number;
       lastRetryFailoverReason: FailoverReason | null;
-      retryKind?: "same_model_idle_timeout" | "same_model_rate_limit";
+      retryKind?: "same_model_idle_timeout" | "same_model_rate_limit" | "api_key_rotation";
     }
   | {
       action: "throw";
@@ -168,7 +168,8 @@ export async function handleAssistantFailover(params: {
   }) => void;
   maybeRetrySameModelRateLimit: (retry?: ShortWindowRateLimitRetry) => Promise<boolean>;
   maybeBackoffBeforeOverloadFailover: (reason: FailoverReason | null) => Promise<void>;
-  advanceAuthProfile: () => Promise<boolean>;
+  advanceProviderApiKey: () => Promise<false | "api_key">;
+  advanceAuthProfile: () => Promise<false | "api_key" | "profile">;
 }): Promise<AssistantFailoverOutcome> {
   let overloadProfileRotations = params.overloadProfileRotations;
   let decision = params.initialDecision;
@@ -217,40 +218,10 @@ export async function handleAssistantFailover(params: {
       }
     };
 
-    if (params.failoverReason === "overloaded") {
-      overloadProfileRotations += 1;
-      if (
-        overloadProfileRotations > params.overloadProfileRotationLimit &&
-        params.fallbackConfigured
-      ) {
-        const status = resolveFailoverStatus("overloaded");
-        params.warn(
-          `overload profile rotation cap reached for ${sanitizeForLog(params.provider)}/${sanitizeForLog(params.modelId)} after ${overloadProfileRotations} rotations; escalating to model fallback`,
-        );
-        await markFailedProfile();
-        params.logAssistantFailoverDecision("fallback_model", { status });
-        return {
-          action: "throw",
-          overloadProfileRotations,
-          error: new FailoverError(
-            "The AI service is temporarily overloaded. Please try again in a moment.",
-            {
-              reason: "overloaded",
-              provider: params.activeErrorContext.provider,
-              model: params.activeErrorContext.model,
-              profileId: params.lastProfileId,
-              status,
-              rawError: params.lastAssistant?.errorMessage?.trim(),
-            },
-          ),
-        };
-      }
-    }
-
+    let authAdvance: false | "api_key" | "profile" = false;
     if (params.failoverReason === "rate_limit") {
-      // Minute-scale RPM windows can clear without spending a profile rotation
-      // or model fallback. Keep the retry bounded; once exhausted, continue
-      // through the existing rate-limit escalation path.
+      // Minute-scale RPM windows can clear without spending any credential.
+      // Try that bounded same-model path before rotating API keys/profiles.
       const shortWindowRetry = resolveShortWindowRateLimitRetry(params.lastAssistant?.errorMessage);
       if (
         params.allowSameModelRateLimitRetry &&
@@ -259,15 +230,57 @@ export async function handleAssistantFailover(params: {
       ) {
         return sameModelRateLimitRetry();
       }
-      params.maybeEscalateRateLimitProfileFallback({
-        failoverProvider: params.activeErrorContext.provider,
-        failoverModel: params.activeErrorContext.model,
-        logFallbackDecision: params.logAssistantFailoverDecision,
-      });
+      authAdvance = await params.advanceProviderApiKey();
+      if (!authAdvance) {
+        params.maybeEscalateRateLimitProfileFallback({
+          failoverProvider: params.activeErrorContext.provider,
+          failoverModel: params.activeErrorContext.model,
+          logFallbackDecision: params.logAssistantFailoverDecision,
+        });
+      }
     }
-
-    const rotated = await params.advanceAuthProfile();
-    const markFailedProfilePromise = markFailedProfile();
+    if (params.failoverReason === "overloaded") {
+      authAdvance = await params.advanceProviderApiKey();
+      if (!authAdvance) {
+        const nextOverloadProfileRotations = overloadProfileRotations + 1;
+        if (
+          nextOverloadProfileRotations > params.overloadProfileRotationLimit &&
+          params.fallbackConfigured
+        ) {
+          overloadProfileRotations = nextOverloadProfileRotations;
+          const status = resolveFailoverStatus("overloaded");
+          params.warn(
+            `overload profile rotation cap reached for ${sanitizeForLog(params.provider)}/${sanitizeForLog(params.modelId)} after ${overloadProfileRotations} rotations; escalating to model fallback`,
+          );
+          await markFailedProfile();
+          params.logAssistantFailoverDecision("fallback_model", { status });
+          return {
+            action: "throw",
+            overloadProfileRotations,
+            error: new FailoverError(
+              "The AI service is temporarily overloaded. Please try again in a moment.",
+              {
+                reason: "overloaded",
+                provider: params.activeErrorContext.provider,
+                model: params.activeErrorContext.model,
+                profileId: params.lastProfileId,
+                status,
+                rawError: params.lastAssistant?.errorMessage?.trim(),
+              },
+            ),
+          };
+        }
+      }
+    }
+    if (!authAdvance) {
+      authAdvance = await params.advanceAuthProfile();
+    }
+    const rotated = authAdvance !== false;
+    const rotatedApiKey = authAdvance === "api_key";
+    const markFailedProfilePromise = rotatedApiKey ? Promise.resolve() : markFailedProfile();
+    if (params.failoverReason === "overloaded" && rotated && !rotatedApiKey) {
+      overloadProfileRotations += 1;
+    }
     if (timeoutFailure && !params.isProbeSession && failedProfileId) {
       const timeoutLabel = params.idleTimedOut ? "idle timeout (model silent)" : "timed out";
       params.warn(`Profile ${failedProfileId} ${timeoutLabel}. Trying next account...`);
@@ -281,11 +294,14 @@ export async function handleAssistantFailover(params: {
       // Marking the failed profile is non-blocking after rotation succeeds; the
       // retry can proceed with the next profile while the failure record settles.
       void markFailedProfilePromise;
-      params.logAssistantFailoverDecision("rotate_profile");
+      if (!rotatedApiKey) {
+        params.logAssistantFailoverDecision("rotate_profile");
+      }
       await params.maybeBackoffBeforeOverloadFailover(params.failoverReason);
       return {
         action: "retry",
         overloadProfileRotations,
+        retryKind: rotatedApiKey ? "api_key_rotation" : undefined,
         lastRetryFailoverReason: mergeRetryFailoverReason({
           previous: params.previousRetryFailoverReason,
           failoverReason: params.failoverReason,

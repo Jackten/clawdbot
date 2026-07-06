@@ -138,15 +138,33 @@ function listModelAliasCandidates(cfg: OpenClawConfig): ModelAliasCandidate[] {
   });
 }
 
-function findModelAliasCandidate(
-  cfg: OpenClawConfig,
-  raw: string,
-): ModelAliasCandidate | undefined {
-  const aliasKey = normalizeLowercaseStringOrEmpty(raw);
-  let match: ModelAliasCandidate | undefined;
-  for (const candidate of listModelAliasCandidates(cfg)) {
-    if (normalizeLowercaseStringOrEmpty(candidate.alias) === aliasKey) {
-      match = candidate;
+function resolveConfiguredModelAliasRef(params: {
+  cfg: OpenClawConfig;
+  rawAlias: string;
+  defaultProvider: string;
+  allowManifestNormalization?: boolean;
+  allowPluginNormalization?: boolean;
+  manifestPluginContext: ModelManifestPluginContext;
+}): ModelRef | null {
+  const aliasKey = normalizeLowercaseStringOrEmpty(params.rawAlias);
+  if (!aliasKey) {
+    return null;
+  }
+  let match: ModelRef | null = null;
+  for (const candidate of listModelAliasCandidates(params.cfg)) {
+    if (normalizeLowercaseStringOrEmpty(candidate.alias) !== aliasKey) {
+      continue;
+    }
+    const parsed = parseModelRefWithCompatAlias({
+      cfg: params.cfg,
+      raw: candidate.keyRaw,
+      defaultProvider: params.defaultProvider,
+      allowManifestNormalization: params.allowManifestNormalization,
+      allowPluginNormalization: params.allowPluginNormalization ?? false,
+      manifestPlugins: params.manifestPluginContext.get(),
+    });
+    if (parsed) {
+      match = parsed;
     }
   }
   return match;
@@ -575,7 +593,7 @@ function buildModelAliasIndexWithManifestContext(
       raw: keyRaw,
       defaultProvider: params.defaultProvider,
       allowManifestNormalization: params.allowManifestNormalization,
-      allowPluginNormalization: params.allowPluginNormalization,
+      allowPluginNormalization: params.allowPluginNormalization ?? false,
       manifestPlugins,
     });
     if (!parsed) {
@@ -777,29 +795,30 @@ export function resolveConfiguredModelRef(
     const { model: modelWithoutProfile } = splitTrailingAuthProfile(trimmed);
     const manifestPluginContext = createModelManifestPluginContext(params);
     const profileStripped = Boolean(modelWithoutProfile && modelWithoutProfile !== trimmed);
-    const exactAliasCandidate = findModelAliasCandidate(params.cfg, trimmed);
-    const strippedAliasCandidate = profileStripped
-      ? findModelAliasCandidate(params.cfg, modelWithoutProfile)
-      : undefined;
-    const profileAliasCandidate = profileStripped
-      ? (exactAliasCandidate ?? strippedAliasCandidate)
-      : undefined;
-    if (profileAliasCandidate) {
+    const primaryWithoutProfile = modelWithoutProfile || trimmed;
+    const profileAliasRef = profileStripped
+      ? (resolveConfiguredModelAliasRef({
+          cfg: params.cfg,
+          rawAlias: trimmed,
+          defaultProvider: params.defaultProvider,
+          allowManifestNormalization: params.allowManifestNormalization,
+          allowPluginNormalization: params.allowPluginNormalization,
+          manifestPluginContext,
+        }) ??
+        resolveConfiguredModelAliasRef({
+          cfg: params.cfg,
+          rawAlias: modelWithoutProfile,
+          defaultProvider: params.defaultProvider,
+          allowManifestNormalization: params.allowManifestNormalization,
+          allowPluginNormalization: params.allowPluginNormalization,
+          manifestPluginContext,
+        }))
+      : null;
+    if (profileAliasRef) {
       // Auth-profile suffixes are not part of alias matching; resolve the alias
       // target while preserving the provider/model semantics of the key.
-      const aliasRef = parseModelRefWithCompatAlias({
-        cfg: params.cfg,
-        raw: profileAliasCandidate.keyRaw,
-        defaultProvider: params.defaultProvider,
-        allowManifestNormalization: params.allowManifestNormalization,
-        allowPluginNormalization: params.allowPluginNormalization,
-        manifestPlugins: manifestPluginContext.get(),
-      });
-      if (aliasRef) {
-        return aliasRef;
-      }
+      return profileAliasRef;
     }
-    const primaryWithoutProfile = modelWithoutProfile || trimmed;
     const exactConfiguredPrimary = findExactConfiguredProviderRefParts({
       cfg: params.cfg,
       raw: primaryWithoutProfile,
@@ -810,37 +829,20 @@ export function resolveConfiguredModelRef(
         manifestPlugins: manifestPluginContext.get(),
       });
     }
-    const aliasCandidate = profileStripped ? undefined : exactAliasCandidate;
     const manifestPlugins = manifestPluginContext.peek();
-    if (
-      aliasCandidate &&
-      hasSlashFormModelRef(primaryWithoutProfile) &&
-      !hasSlashFormModelRef(aliasCandidate.keyRaw)
-    ) {
-      const primaryRef = parseModelRefWithCompatAlias({
-        cfg: params.cfg,
-        raw: primaryWithoutProfile,
-        defaultProvider: params.defaultProvider,
-        allowManifestNormalization: params.allowManifestNormalization,
-        allowPluginNormalization: params.allowPluginNormalization,
-        manifestPlugins: manifestPluginContext.get(),
-      });
-      if (primaryRef) {
-        return primaryRef;
-      }
-    }
-    if (aliasCandidate) {
-      const aliasRef = parseModelRefWithCompatAlias({
-        cfg: params.cfg,
-        raw: aliasCandidate.keyRaw,
-        defaultProvider: params.defaultProvider,
-        allowManifestNormalization: params.allowManifestNormalization,
-        allowPluginNormalization: params.allowPluginNormalization,
-        manifestPlugins: manifestPluginContext.get(),
-      });
-      if (aliasRef) {
-        return aliasRef;
-      }
+    const aliasRef =
+      !profileStripped && !hasSlashFormModelRef(primaryWithoutProfile)
+        ? resolveConfiguredModelAliasRef({
+            cfg: params.cfg,
+            rawAlias: trimmed,
+            defaultProvider: params.defaultProvider,
+            allowManifestNormalization: params.allowManifestNormalization,
+            allowPluginNormalization: params.allowPluginNormalization,
+            manifestPluginContext,
+          })
+        : null;
+    if (aliasRef) {
+      return aliasRef;
     }
 
     if (!trimmed.includes("/")) {
@@ -853,7 +855,7 @@ export function resolveConfiguredModelRef(
         raw: trimmed,
         defaultProvider: params.defaultProvider,
         allowManifestNormalization: params.allowManifestNormalization,
-        allowPluginNormalization: params.allowPluginNormalization,
+        allowPluginNormalization: params.allowPluginNormalization ?? false,
         manifestPlugins: needsOpenRouterCompatManifestPlugins
           ? manifestPluginContext.get()
           : manifestPlugins,
@@ -889,7 +891,7 @@ export function resolveConfiguredModelRef(
           allowManifestNormalization: inferredProviderManifestPlugins
             ? params.allowManifestNormalization
             : false,
-          allowPluginNormalization: params.allowPluginNormalization,
+          allowPluginNormalization: params.allowPluginNormalization ?? false,
           manifestPlugins: inferredProviderManifestPlugins,
         });
       }
@@ -907,7 +909,7 @@ export function resolveConfiguredModelRef(
       raw: trimmed,
       defaultProvider: params.defaultProvider,
       allowManifestNormalization: params.allowManifestNormalization,
-      allowPluginNormalization: params.allowPluginNormalization,
+      allowPluginNormalization: params.allowPluginNormalization ?? false,
       manifestPlugins: manifestPluginContext.get(),
     });
     if (resolved) {

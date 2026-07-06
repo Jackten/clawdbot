@@ -185,7 +185,7 @@ import {
   shouldWarnEmbeddedRunStageSummary,
 } from "./run/attempt-stage-timing.js";
 import { forgetPromptBuildDrainCacheForRun } from "./run/attempt.prompt-helpers.js";
-import { createEmbeddedRunAuthController } from "./run/auth-controller.js";
+import { createEmbeddedRunAuthController, type AuthAdvanceResult } from "./run/auth-controller.js";
 import { resolveAuthProfileFailureReason } from "./run/auth-profile-failure-policy.js";
 import { runEmbeddedAttemptWithBackend } from "./run/backend.js";
 import {
@@ -1426,7 +1426,9 @@ async function runEmbeddedAgentInternal(
       let profileIndex = 0;
       const traceAttempts: TraceAttempt[] = [];
       const traceAttemptUsesFallback = (attempt: TraceAttempt): boolean =>
-        attempt.result === "rotate_profile" || attempt.result === "fallback_model";
+        attempt.result === "rotate_api_key" ||
+        attempt.result === "rotate_profile" ||
+        attempt.result === "fallback_model";
       const resolveRuntimeFallbackReason = (): string | null => {
         const fallbackAttempt = traceAttempts.findLast(
           (attempt) => attempt.result === "fallback_model" && typeof attempt.reason === "string",
@@ -1492,6 +1494,7 @@ async function runEmbeddedAgentInternal(
       let runtimeAuthRefreshCancelled = false;
       const {
         advanceAuthProfile,
+        advanceProviderApiKey,
         initializeAuthProfile,
         maybeRefreshRuntimeAuthForAuthError,
         stopRuntimeAuthRefreshTimer,
@@ -1542,7 +1545,7 @@ async function runEmbeddedAgentInternal(
         },
         log,
       });
-      const advancePluginHarnessAuthProfile = async (): Promise<boolean> => {
+      const advancePluginHarnessAuthProfile = async (): Promise<AuthAdvanceResult> => {
         if (!pluginHarnessOwnsTransport || lockedProfileId) {
           return false;
         }
@@ -1561,7 +1564,7 @@ async function runEmbeddedAgentInternal(
           lastProfileId = candidate;
           thinkLevel = initialThinkLevel;
           attemptedThinking.clear();
-          return true;
+          return "profile";
         }
         return false;
       };
@@ -1569,6 +1572,10 @@ async function runEmbeddedAgentInternal(
         pluginHarnessOwnsTransport && !pluginHarnessNeedsOpenClawAuthBootstrap
           ? advancePluginHarnessAuthProfile
           : advanceAuthProfile;
+      const advanceAttemptProviderApiKey =
+        pluginHarnessOwnsTransport && !pluginHarnessNeedsOpenClawAuthBootstrap
+          ? async () => false as const
+          : advanceProviderApiKey;
 
       // Plugin harnesses own their model transport/auth. Running OpenClaw's generic
       // auth bootstrap here can turn synthetic provider markers into real
@@ -3293,13 +3300,6 @@ async function runEmbeddedAgentInternal(
               fallbackConfigured,
               aborted,
             });
-            if (promptFailoverReason === "rate_limit") {
-              maybeEscalateRateLimitProfileFallback({
-                failoverProvider: provider,
-                failoverModel: modelId,
-                logFallbackDecision: logPromptFailoverDecision,
-              });
-            }
             let promptFailoverDecision = resolveRunFailoverDecision({
               stage: "prompt",
               aborted,
@@ -3312,11 +3312,28 @@ async function runEmbeddedAgentInternal(
               timedOutByRunBudget,
               profileRotated: false,
             });
-            if (
-              promptFailoverDecision.action === "rotate_profile" &&
-              (await advanceAttemptAuthProfile())
-            ) {
-              if (failedPromptProfileId && promptProfileFailureReason) {
+            let promptAuthAdvance: AuthAdvanceResult = false;
+            if (promptFailoverDecision.action === "rotate_profile") {
+              if (promptFailoverReason === "rate_limit") {
+                promptAuthAdvance = await advanceAttemptProviderApiKey();
+                if (!promptAuthAdvance) {
+                  maybeEscalateRateLimitProfileFallback({
+                    failoverProvider: provider,
+                    failoverModel: modelId,
+                    logFallbackDecision: logPromptFailoverDecision,
+                  });
+                }
+              }
+              if (!promptAuthAdvance) {
+                promptAuthAdvance = await advanceAttemptAuthProfile();
+              }
+            }
+            if (promptFailoverDecision.action === "rotate_profile" && promptAuthAdvance) {
+              if (
+                promptAuthAdvance !== "api_key" &&
+                failedPromptProfileId &&
+                promptProfileFailureReason
+              ) {
                 void maybeMarkAuthProfileFailure({
                   profileId: failedPromptProfileId,
                   reason: promptProfileFailureReason,
@@ -3328,7 +3345,12 @@ async function runEmbeddedAgentInternal(
               traceAttempts.push({
                 provider,
                 model: modelId,
-                result: promptFailoverReason === "timeout" ? "timeout" : "rotate_profile",
+                result:
+                  promptFailoverReason === "timeout"
+                    ? "timeout"
+                    : promptAuthAdvance === "api_key"
+                      ? "rotate_api_key"
+                      : "rotate_profile",
                 ...(promptFailoverReason ? { reason: promptFailoverReason } : {}),
                 stage: "prompt",
               });
@@ -3336,7 +3358,9 @@ async function runEmbeddedAgentInternal(
                 previous: lastRetryFailoverReason,
                 failoverReason: promptFailoverReason,
               });
-              logPromptFailoverDecision("rotate_profile");
+              if (promptAuthAdvance !== "api_key") {
+                logPromptFailoverDecision("rotate_profile");
+              }
               await maybeBackoffBeforeOverloadFailover(promptFailoverReason);
               continue;
             }
@@ -3602,6 +3626,7 @@ async function runEmbeddedAgentInternal(
             maybeRetrySameModelRateLimit,
             maybeBackoffBeforeOverloadFailover,
             advanceAuthProfile: advanceAttemptAuthProfile,
+            advanceProviderApiKey: advanceAttemptProviderApiKey,
           });
           overloadProfileRotations = assistantFailoverOutcome.overloadProfileRotations;
           if (assistantFailoverOutcome.action === "retry") {
@@ -3615,7 +3640,12 @@ async function runEmbeddedAgentInternal(
             traceAttempts.push({
               provider: activeErrorContext.provider,
               model: activeErrorContext.model,
-              result: retryTraceResult,
+              result:
+                assistantFailoverOutcome.retryKind === "same_model_rate_limit"
+                  ? "same_model_rate_limit"
+                  : assistantFailoverOutcome.retryKind === "api_key_rotation"
+                    ? "rotate_api_key"
+                    : retryTraceResult,
               ...(assistantFailoverReason ? { reason: assistantFailoverReason } : {}),
               stage: "assistant",
             });

@@ -48,6 +48,7 @@ function makeParams(overrides: Partial<Params> = {}): Params {
     maybeEscalateRateLimitProfileFallback: vi.fn(),
     maybeRetrySameModelRateLimit: vi.fn(async () => false),
     maybeBackoffBeforeOverloadFailover: vi.fn(async () => {}),
+    advanceProviderApiKey: vi.fn(async () => false),
     advanceAuthProfile: vi.fn(async () => false),
   };
   return { ...defaults, ...overrides };

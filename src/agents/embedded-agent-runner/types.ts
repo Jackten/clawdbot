@@ -91,6 +91,7 @@ export type TraceAttempt = {
     | "timeout"
     | "surface_error"
     | "candidate_failed"
+    | "rotate_api_key"
     | "rotate_profile"
     | "same_model_rate_limit"
     | "fallback_model"

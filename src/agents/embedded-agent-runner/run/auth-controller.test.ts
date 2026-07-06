@@ -163,6 +163,7 @@ describe("createEmbeddedRunAuthController", () => {
   beforeEach(() => {
     mocks.prepareProviderRuntimeAuth.mockReset();
     mocks.getApiKeyForModel.mockReset();
+    delete process.env.CUSTOM_OPENAI_API_KEYS;
   });
 
   it("applies runtime request overrides on the first auth exchange", async () => {
@@ -355,6 +356,71 @@ describe("createEmbeddedRunAuthController", () => {
       reason: "billing",
       authMode: "oauth",
     });
+  });
+
+  it("rotates through additional provider API keys before profile fallback", async () => {
+    process.env.CUSTOM_OPENAI_API_KEYS = "source-api-key backup-api-key";
+    const harness = createMutableAuthControllerHarness();
+    const setRuntimeApiKey = vi.fn<(provider: string, apiKey: string) => void>();
+
+    mocks.getApiKeyForModel.mockResolvedValue({
+      apiKey: "source-api-key",
+      mode: "api-key",
+      profileId: "default",
+      source: "env",
+    });
+    mocks.prepareProviderRuntimeAuth.mockResolvedValue(null);
+
+    const controller = createMutableEmbeddedRunAuthController({
+      harness,
+      setRuntimeApiKey,
+    });
+
+    await controller.initializeAuthProfile();
+    await expect(controller.advanceAuthProfile()).resolves.toBe("api_key");
+
+    expect(setRuntimeApiKey).toHaveBeenNthCalledWith(1, "custom-openai", "source-api-key");
+    expect(setRuntimeApiKey).toHaveBeenNthCalledWith(2, "custom-openai", "backup-api-key");
+    expect(harness.profileIndex).toBe(0);
+  });
+
+  it("prepares runtime auth again when rotating provider API keys", async () => {
+    process.env.CUSTOM_OPENAI_API_KEYS = "source-api-key backup-api-key";
+    const harness = createMutableAuthControllerHarness();
+    const setRuntimeApiKey = vi.fn<(provider: string, apiKey: string) => void>();
+
+    mocks.getApiKeyForModel.mockResolvedValue({
+      apiKey: "source-api-key",
+      mode: "api-key",
+      profileId: "default",
+      source: "env",
+    });
+    mocks.prepareProviderRuntimeAuth.mockImplementation(async ({ context }) => ({
+      apiKey: `runtime-${context.apiKey}`,
+      expiresAt: Date.now() + 60_000,
+    }));
+
+    const controller = createMutableEmbeddedRunAuthController({
+      harness,
+      setRuntimeApiKey,
+    });
+
+    await controller.initializeAuthProfile();
+    await expect(controller.advanceAuthProfile()).resolves.toBe("api_key");
+
+    expect(mocks.prepareProviderRuntimeAuth).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        context: expect.objectContaining({ apiKey: "source-api-key" }),
+      }),
+    );
+    expect(mocks.prepareProviderRuntimeAuth).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        context: expect.objectContaining({ apiKey: "backup-api-key" }),
+      }),
+    );
+    expect(setRuntimeApiKey).toHaveBeenLastCalledWith("custom-openai", "runtime-backup-api-key");
   });
 
   it("rejects privileged runtime transport overrides on the first auth exchange", async () => {
