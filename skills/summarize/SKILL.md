@@ -85,3 +85,7 @@ Optional services:
 
 - `FIRECRAWL_API_KEY` for blocked sites
 - `APIFY_API_TOKEN` for YouTube fallback
+
+## Human-Facing Reports Rule
+
+Any report, research brief, audit, comparison, itinerary, decision packet, or source-backed deliverable intended for Jack or another human to read must be delivered as polished HTML or PDF. Do not deliver human-facing reports as raw Markdown unless Jack explicitly asks for Markdown. Markdown is only for agent-internal notes, scratch files, source sidecars, wiki pages, code docs, and reproducibility artifacts. Human-facing HTML/PDF reports must include working clickable links and a readable source ledger when sources matter.
