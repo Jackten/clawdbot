@@ -2816,27 +2816,21 @@ export async function dispatchReplyFromConfig(
         ...(hasTranscriptOwner ? { mirror: false } : {}),
       });
       if (result) {
-        if (!result.ok && result.fallbackToDispatcher === true) {
+        if (!result.ok) {
           logVerbose(
-            `dispatch-from-config: route-reply (final) produced no visible delivery; falling back to channel dispatcher`,
+            `dispatch-from-config: route-reply (final) failed: ${result.error ?? "unknown error"}`,
           );
-        } else {
-          if (!result.ok) {
-            logVerbose(
-              `dispatch-from-config: route-reply (final) failed: ${result.error ?? "unknown error"}`,
-            );
-          }
-          if (isRoutedReplyDelivered(result)) {
-            await mirrorDeliveredReplyToTranscript({
-              metadata: sourceReplyTranscriptMirror,
-              cfg,
-            });
-          }
-          return {
-            queuedFinal: result.ok,
-            routedFinalCount: isRoutedReplyDelivered(result) ? 1 : 0,
-          };
         }
+        if (isRoutedReplyDelivered(result)) {
+          await mirrorDeliveredReplyToTranscript({
+            metadata: sourceReplyTranscriptMirror,
+            cfg,
+          });
+        }
+        return {
+          queuedFinal: result.ok,
+          routedFinalCount: isRoutedReplyDelivered(result) ? 1 : 0,
+        };
       }
       throwIfFinalDeliveryAborted();
       const transcriptMirrorSessionKey =

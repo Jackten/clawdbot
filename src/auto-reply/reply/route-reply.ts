@@ -11,7 +11,6 @@ import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/s
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { resolveEffectiveMessagesConfig } from "../../agents/identity.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
-import type { DurableMessageBatchSendResult } from "../../channels/message/runtime.js";
 import { getBundledChannelPlugin } from "../../channels/plugins/bundled.js";
 import { getLoadedChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import { normalizeChatChannelId } from "../../channels/registry.js";
@@ -109,12 +108,10 @@ type RouteReplyParams = {
 type RouteReplyResult = {
   /** Whether the reply was sent successfully. */
   ok: boolean;
-  /** True when the routed path produced no visible result and caller fallback is allowed. */
-  fallbackToDispatcher?: boolean;
   /** True when a hook intentionally suppressed provider delivery. */
   suppressed?: boolean;
   /** Suppression reason when delivery was intentionally skipped. */
-  reason?: Extract<DurableMessageBatchSendResult, { status: "suppressed" }>["reason"];
+  reason?: "cancelled_by_reply_payload_sending_hook" | "empty_after_reply_payload_sending_hook";
   /** Optional message ID from the provider. */
   messageId?: string;
   /** Error message if the send failed. */
@@ -317,15 +314,11 @@ export async function routeReply(params: RouteReplyParams): Promise<RouteReplyRe
     if (send.status === "failed" || send.status === "partial_failed") {
       throw send.error;
     }
-    if (send.status === "suppressed") {
-      if (send.reason === "no_visible_result") {
-        return {
-          ok: false,
-          fallbackToDispatcher: true,
-          reason: send.reason,
-          error: "Routed reply produced no visible delivery result",
-        };
-      }
+    if (
+      send.status === "suppressed" &&
+      (send.reason === "cancelled_by_reply_payload_sending_hook" ||
+        send.reason === "empty_after_reply_payload_sending_hook")
+    ) {
       return {
         ok: true,
         suppressed: true,

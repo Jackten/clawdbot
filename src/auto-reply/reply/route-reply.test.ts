@@ -649,25 +649,6 @@ describe("routeReply", () => {
     expect(mocks.deliverOutboundPayloads).toHaveBeenCalledTimes(1);
   });
 
-  it("signals dispatcher fallback when routed delivery produces no visible result", async () => {
-    mocks.deliverOutboundPayloads.mockResolvedValueOnce([]);
-
-    const res = await routeReply({
-      payload: { text: "hello" },
-      channel: "telegram",
-      to: "chat-1",
-      cfg: {} as never,
-    });
-
-    expect(res).toEqual({
-      ok: false,
-      fallbackToDispatcher: true,
-      reason: "no_visible_result",
-      error: "Routed reply produced no visible delivery result",
-    });
-    expect(mocks.deliverOutboundPayloads).toHaveBeenCalledTimes(1);
-  });
-
   it("passes policySessionKey through to outbound delivery targets", async () => {
     const cfg = {
       agents: {
