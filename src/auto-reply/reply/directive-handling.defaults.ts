@@ -6,6 +6,25 @@ import {
 } from "../../agents/model-selection.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 
+function createLazyAliasIndex(build: () => ModelAliasIndex): ModelAliasIndex {
+  let cached: ModelAliasIndex | undefined;
+  const get = () => {
+    cached ??= build();
+    return cached;
+  };
+  return {
+    get byAlias() {
+      return get().byAlias;
+    },
+    get byProviderAlias() {
+      return get().byProviderAlias;
+    },
+    get byKey() {
+      return get().byKey;
+    },
+  };
+}
+
 /** Resolve default provider/model plus alias index for directive parsing. */
 export function resolveDefaultModel(params: { cfg: OpenClawConfig; agentId?: string }): {
   defaultProvider: string;
@@ -21,10 +40,12 @@ export function resolveDefaultModel(params: { cfg: OpenClawConfig; agentId?: str
   });
   const defaultProvider = mainModel.provider;
   const defaultModel = mainModel.model;
-  const aliasIndex = buildModelAliasIndex({
-    cfg: params.cfg,
-    defaultProvider,
-    allowPluginNormalization: false,
-  });
+  const aliasIndex = createLazyAliasIndex(() =>
+    buildModelAliasIndex({
+      cfg: params.cfg,
+      defaultProvider,
+      allowPluginNormalization: false,
+    }),
+  );
   return { defaultProvider, defaultModel, aliasIndex };
 }
