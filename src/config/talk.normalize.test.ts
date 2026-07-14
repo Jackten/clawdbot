@@ -54,6 +54,13 @@ describe("talk normalization", () => {
         reasoningEffort: " low ",
         brain: "agent-consult",
         consultRouting: "force-agent-consult",
+        clientTools: [
+          {
+            name: " phone_vibrate ",
+            description: " Vibrate the phone. ",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
       },
       interruptOnSpeech: true,
     });
@@ -84,6 +91,13 @@ describe("talk normalization", () => {
         reasoningEffort: "low",
         brain: "agent-consult",
         consultRouting: "force-agent-consult",
+        clientTools: [
+          {
+            name: "phone_vibrate",
+            description: "Vibrate the phone.",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
       },
       interruptOnSpeech: true,
     });

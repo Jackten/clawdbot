@@ -215,6 +215,15 @@ export const FIELD_HELP: Record<string, string> = {
     "Talk reasoning strategy: agent-consult for Gateway-mediated agent help, direct-tools for local tool calls, or none.",
   "talk.realtime.consultRouting":
     "Gateway relay fallback for final user transcripts when the realtime provider skips openclaw_agent_consult. provider-direct preserves provider replies; force-agent-consult routes through OpenClaw.",
+  "talk.realtime.clientTools":
+    "Client-executed function tools exposed to Gateway-relayed realtime Talk sessions after OpenClaw's built-in consult and control tools. The owning client receives tool.call events and returns results with talk.session.submitToolResult.",
+  "talk.realtime.clientTools.*": "One client-executed realtime Talk function tool.",
+  "talk.realtime.clientTools.*.name":
+    "Provider-facing function name. Must not collide with openclaw_agent_consult or openclaw_agent_control.",
+  "talk.realtime.clientTools.*.description":
+    "Provider-facing description of when and how to call this client tool.",
+  "talk.realtime.clientTools.*.parameters":
+    "Optional object-shaped JSON Schema for the tool arguments. Omit it to use an empty object schema.",
   "talk.consultThinkingLevel":
     "Use this to override the thinking level for the regular agent run behind Talk realtime consults.",
   "talk.consultFastMode":

@@ -76,8 +76,19 @@ Supported keys: `voice` / `voice_id` / `voiceId`, `model` / `model_id` / `modelI
       },
       instructions: "Speak warmly and keep answers brief.",
       mode: "realtime",
-      transport: "webrtc",
+      transport: "gateway-relay",
       brain: "agent-consult",
+      clientTools: [
+        {
+          name: "phone_vibrate",
+          description: "Vibrate the phone with the requested pattern.",
+          parameters: {
+            type: "object",
+            properties: { pattern: { type: "string" } },
+            required: ["pattern"],
+          },
+        },
+      ],
     },
   },
 }
@@ -102,6 +113,7 @@ Supported keys: `voice` / `voice_id` / `voiceId`, `model` / `model_id` / `modelI
 | `realtime.transport`                     | -                                          | `webrtc`: client-owned OpenAI WebRTC on iOS and in the browser. `provider-websocket`: browser-owned, stays on Gateway relay on iOS. `gateway-relay`: keeps provider audio on the Gateway; Android uses realtime only with this transport.                                  |
 | `realtime.brain`                         | -                                          | `agent-consult` routes realtime tool calls through Gateway policy; `direct-tools` is legacy direct-tool compatibility; `none` is for transcription/external orchestration.                                                                                                 |
 | `realtime.consultRouting`                | -                                          | `provider-direct` preserves the provider's direct reply when it skips `openclaw_agent_consult`; `force-agent-consult` routes finalized user transcripts through OpenClaw instead.                                                                                          |
+| `realtime.clientTools`                   | -                                          | Client-executed function tools for `gateway-relay` sessions. OpenClaw appends them after its built-in consult/control tools, emits calls to the owning client on `talk.event`, and rejects the reserved names `openclaw_agent_consult` and `openclaw_agent_control`.       |
 | `realtime.instructions`                  | -                                          | Appends provider-facing system instructions to OpenClaw's built-in realtime prompt (voice style/tone); the default `openclaw_agent_consult` guidance stays.                                                                                                                |
 
 `talk.catalog` exposes canonical provider ids and registry aliases, each provider's valid modes/transports/brain strategies/realtime audio formats/capability flags, and the runtime-selected readiness result. First-party Talk clients should read that catalog instead of maintaining provider aliases locally; treat an older Gateway that omits group readiness as unverified rather than definitively unconfigured. Streaming transcription providers are discovered through `talk.catalog.transcription`; the current Gateway relay uses the Voice Call streaming provider config until a dedicated Talk transcription config surface ships.

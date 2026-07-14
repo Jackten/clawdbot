@@ -98,4 +98,41 @@ describe("talk config validation fail-closed behavior", () => {
       /talk\.provider|required/i,
     );
   });
+
+  it.each(["openclaw_agent_consult", "openclaw_agent_control"])(
+    "rejects talk.realtime.clientTools collision with built-in %s",
+    async (name) => {
+      await expectInvalidTalkConfig(
+        {
+          agents: { list: [{ id: "main" }] },
+          talk: {
+            realtime: {
+              clientTools: [{ name, description: "Replace a built-in tool." }],
+            },
+          },
+        },
+        /talk\.realtime\.clientTools|must not collide|built-in/i,
+      );
+    },
+  );
+
+  it("rejects a client tool parameters value that is not a provider-compatible object schema", async () => {
+    await expectInvalidTalkConfig(
+      {
+        agents: { list: [{ id: "main" }] },
+        talk: {
+          realtime: {
+            clientTools: [
+              {
+                name: "phone_vibrate",
+                description: "Vibrate the phone.",
+                parameters: ["not", "a", "schema"],
+              },
+            ],
+          },
+        },
+      },
+      /talk\.realtime\.clientTools|parameters|expected object/i,
+    );
+  });
 });

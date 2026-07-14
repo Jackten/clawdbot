@@ -17,10 +17,12 @@ import {
   validateTalkSessionSubmitToolResultParams,
   validateTalkSessionTurnParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import { REALTIME_VOICE_AGENT_CONSULT_TOOL } from "../../talk/agent-consult-tool.js";
+import type { TalkRealtimeClientToolConfig } from "../../config/types.gateway.js";
+import { resolveRealtimeVoiceAgentConsultTools } from "../../talk/agent-consult-tool.js";
 import { REALTIME_VOICE_AGENT_CONTROL_TOOL } from "../../talk/agent-run-control-shared.js";
 import { controlRealtimeVoiceAgentRun } from "../../talk/agent-run-control.js";
 import { resolveConfiguredRealtimeVoiceProvider } from "../../talk/provider-resolver.js";
+import type { RealtimeVoiceTool } from "../../talk/provider-types.js";
 import type { TalkBrain, TalkMode, TalkTransport } from "../../talk/talk-events.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { resolveSessionKeyFromResolveParams } from "../sessions-resolve.js";
@@ -77,6 +79,29 @@ import { assertValidParams } from "./validation.js";
  * can enforce the correct connection ownership for its concrete backend.
  */
 type ManagedRoomTalkSession = Extract<UnifiedTalkSessionRecord, { kind: "managed-room" }>;
+
+function buildTalkRealtimeRelayTools(
+  clientTools: TalkRealtimeClientToolConfig[] | undefined,
+): RealtimeVoiceTool[] {
+  const configuredTools = (clientTools ?? []).map(
+    (tool): RealtimeVoiceTool => ({
+      type: "function",
+      name: tool.name,
+      description: tool.description,
+      // Provider bridges own JSON Schema compatibility; config preserves this payload verbatim.
+      parameters:
+        tool.parameters === undefined
+          ? { type: "object", properties: {} }
+          : (tool.parameters as RealtimeVoiceTool["parameters"]),
+    }),
+  );
+  // The shared resolver keeps consult first and prevents later tools from replacing it.
+  // Inserting control before config applies the same guard to both built-in contracts.
+  return resolveRealtimeVoiceAgentConsultTools("owner", [
+    REALTIME_VOICE_AGENT_CONTROL_TOOL,
+    ...configuredTools,
+  ]);
+}
 
 function normalizeTalkSessionMode(params: { mode?: string; transport?: string }): TalkMode {
   const mode = normalizeOptionalLowercaseString(params.mode) as TalkMode | undefined;
@@ -329,7 +354,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
           provider: resolution.provider,
           providerConfig: withRealtimeBrowserOverrides(resolution.providerConfig, launchOptions),
           instructions: buildRealtimeInstructions(realtimeConfig.instructions),
-          tools: [REALTIME_VOICE_AGENT_CONSULT_TOOL, REALTIME_VOICE_AGENT_CONTROL_TOOL],
+          tools: buildTalkRealtimeRelayTools(realtimeConfig.clientTools),
           model: launchOptions.model,
           sessionKey: normalizeOptionalString(params.sessionKey),
           voice: launchOptions.voice,

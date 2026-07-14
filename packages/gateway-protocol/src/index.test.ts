@@ -328,6 +328,16 @@ describe("validateTalkConfigResult", () => {
               reasoningEffort: "low",
               brain: "agent-consult",
               consultRouting: "force-agent-consult",
+              clientTools: [
+                {
+                  name: "phone_vibrate",
+                  description: "Vibrate the phone.",
+                  parameters: {
+                    type: "object",
+                    properties: { pattern: { type: "string" } },
+                  },
+                },
+              ],
             },
           },
         },

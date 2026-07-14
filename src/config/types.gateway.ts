@@ -51,6 +51,15 @@ export type TalkProviderConfig = {
   [key: string]: unknown;
 };
 
+export type TalkRealtimeClientToolConfig = {
+  /** Provider-facing function name. Must not collide with an OpenClaw realtime tool. */
+  name: string;
+  /** Provider-facing description of when and how to use the tool. */
+  description: string;
+  /** Object-shaped JSON Schema for tool arguments. Defaults to an empty object schema. */
+  parameters?: unknown;
+};
+
 export type TalkRealtimeConfig = {
   /** Active realtime voice provider. */
   provider?: string;
@@ -82,6 +91,8 @@ export type TalkRealtimeConfig = {
   brain?: "agent-consult" | "direct-tools" | "none";
   /** How Gateway relay handles final user transcripts when the provider skips a consult. */
   consultRouting?: "provider-direct" | "force-agent-consult";
+  /** Client-executed tools exposed to Gateway-relayed realtime providers. */
+  clientTools?: TalkRealtimeClientToolConfig[];
 };
 
 export type ResolvedTalkConfig = {

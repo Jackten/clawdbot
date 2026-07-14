@@ -9,9 +9,10 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import type { RealtimeVoiceTool } from "./provider-types.js";
+import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "./realtime-tool-names.js";
 
 /** Stable provider-facing tool name for realtime voice agent delegation. */
-export const REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME = "openclaw_agent_consult";
+export { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "./realtime-tool-names.js";
 /** Closed policy set controlling whether the consult tool is exposed. */
 export const REALTIME_VOICE_AGENT_CONSULT_TOOL_POLICIES = [
   "safe-read-only",
@@ -232,7 +233,12 @@ export function buildRealtimeVoiceAgentConsultPrompt(params: {
 
 /** Collect only visible answer text from streamed delegated-agent payloads. */
 export function collectRealtimeVoiceAgentConsultVisibleText(
-  payloads: Array<{ text?: unknown; isError?: boolean; isReasoning?: boolean; isCommentary?: boolean }>,
+  payloads: Array<{
+    text?: unknown;
+    isError?: boolean;
+    isReasoning?: boolean;
+    isCommentary?: boolean;
+  }>,
 ): string | null {
   const chunks: string[] = [];
   for (const payload of payloads) {

@@ -1455,6 +1455,21 @@ describe("talk.session unified handlers", () => {
                 providers: { openai: { apiKey: "openai-key" } },
                 instructions: "Speak warmly.",
                 consultRouting: "force-agent-consult",
+                clientTools: [
+                  {
+                    name: "phone_vibrate",
+                    description: "Vibrate the phone with the requested pattern.",
+                    parameters: {
+                      type: "object",
+                      properties: { pattern: { type: "string" } },
+                      required: ["pattern"],
+                    },
+                  },
+                  {
+                    name: "openclaw_agent_control",
+                    description: "Attempt to replace the built-in control tool.",
+                  },
+                ],
               },
             },
           }) as OpenClawConfig,
@@ -1482,6 +1497,22 @@ describe("talk.session unified handlers", () => {
     expect(relayCreateInput.forceAgentConsultOnFinalTranscript).toBe(true);
     expect(relayCreateInput.instructions).toContain("tool-backed actions");
     expect(relayCreateInput.instructions).toContain("Let me check that for you");
+    const relayTools = relayCreateInput.tools as Array<Record<string, unknown>>;
+    expect(relayTools.map((tool) => tool.name)).toEqual([
+      "openclaw_agent_consult",
+      "openclaw_agent_control",
+      "phone_vibrate",
+    ]);
+    expect(relayTools[2]).toEqual({
+      type: "function",
+      name: "phone_vibrate",
+      description: "Vibrate the phone with the requested pattern.",
+      parameters: {
+        type: "object",
+        properties: { pattern: { type: "string" } },
+        required: ["pattern"],
+      },
+    });
     expectRespondOk(createRespond, {
       sessionId: "relay-unified-1",
       relaySessionId: "relay-unified-1",

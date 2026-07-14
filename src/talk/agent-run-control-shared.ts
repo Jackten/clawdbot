@@ -9,6 +9,7 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import type { RealtimeVoiceTool } from "./provider-types.js";
+import { REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME } from "./realtime-tool-names.js";
 import type { TalkEvent } from "./talk-events.js";
 
 /** Provider-facing control modes for status, steering, cancellation, and follow-up work. */
@@ -29,7 +30,7 @@ export type RealtimeVoiceAgentControlProviderResult = {
 };
 
 /** Stable provider-facing tool name for active-run voice control. */
-export const REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME = "openclaw_agent_control";
+export { REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME } from "./realtime-tool-names.js";
 
 /** Realtime function-tool descriptor projected to voice providers. */
 export const REALTIME_VOICE_AGENT_CONTROL_TOOL: RealtimeVoiceTool = {

@@ -250,6 +250,7 @@ export function buildTalkRealtimeConfig(config: OpenClawConfig, requestedProvide
     reasoningEffort: normalizeOptionalString(talkRealtime?.reasoningEffort),
     brain: normalizeOptionalLowercaseString(talkRealtime?.brain),
     consultRouting: normalizeOptionalLowercaseString(talkRealtime?.consultRouting),
+    clientTools: config.talk?.realtime?.clientTools,
   };
 }
 

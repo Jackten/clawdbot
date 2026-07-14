@@ -215,6 +215,12 @@ describe("talk realtime gateway relay", () => {
           name: "openclaw_agent_consult",
           args: { question: "hello" },
         });
+        bridgeRequest?.onToolCall?.({
+          itemId: "item-client-1",
+          callId: "call-client-1",
+          name: "phone_vibrate",
+          args: { pattern: "success" },
+        });
       }),
       sendAudio: vi.fn(),
       setMediaTimestamp: vi.fn(),
@@ -342,7 +348,10 @@ describe("talk realtime gateway relay", () => {
       payload: { text: "hi there" },
     });
 
-    const toolCallPayload = findEventPayload(events, (payload) => payload.type === "toolCall");
+    const toolCallPayload = findEventPayload(
+      events,
+      (payload) => payload.type === "toolCall" && payload.name === "openclaw_agent_consult",
+    );
     expectRecordFields(toolCallPayload, {
       relaySessionId: session.relaySessionId,
       type: "toolCall",
@@ -355,6 +364,26 @@ describe("talk realtime gateway relay", () => {
       type: "tool.call",
       itemId: "item-1",
       callId: "call-1",
+    });
+    const clientToolCallPayload = findEventPayload(
+      events,
+      (payload) => payload.type === "toolCall" && payload.name === "phone_vibrate",
+    );
+    expectRecordFields(clientToolCallPayload, {
+      relaySessionId: session.relaySessionId,
+      type: "toolCall",
+      itemId: "item-client-1",
+      callId: "call-client-1",
+      name: "phone_vibrate",
+      args: { pattern: "success" },
+    });
+    expectRecordFields(clientToolCallPayload.talkEvent, {
+      type: "tool.call",
+      sessionId: session.relaySessionId,
+      turnId: expect.any(String),
+      itemId: "item-client-1",
+      callId: "call-client-1",
+      payload: { name: "phone_vibrate", args: { pattern: "success" } },
     });
 
     sendTalkRealtimeRelayAudio({
@@ -379,8 +408,8 @@ describe("talk realtime gateway relay", () => {
     submitTalkRealtimeRelayToolResult({
       relaySessionId: session.relaySessionId,
       connId: "conn-1",
-      callId: "call-2",
-      result: { status: "already_delivered" },
+      callId: "call-client-1",
+      result: "vibration complete",
       options: { suppressResponse: true },
     });
     cancelTalkRealtimeRelayTurn({
@@ -413,8 +442,8 @@ describe("talk realtime gateway relay", () => {
     expect(bridge.submitToolResult).toHaveBeenNthCalledWith(3, "call-1", { ok: true }, undefined);
     expect(bridge.submitToolResult).toHaveBeenNthCalledWith(
       4,
-      "call-2",
-      { status: "already_delivered" },
+      "call-client-1",
+      "vibration complete",
       { suppressResponse: true },
     );
     expect(bridge.handleBargeIn).toHaveBeenCalledWith({ audioPlaybackActive: true });

@@ -8,6 +8,7 @@ import { z } from "zod";
 import { parseByteSize } from "../cli/parse-bytes.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
 import { normalizeAgentId } from "../routing/session-key.js";
+import { REALTIME_VOICE_BUILTIN_TOOL_NAMES } from "../talk/realtime-tool-names.js";
 import {
   isValidControlUiChatMessageMaxWidth,
   normalizeControlUiChatMessageMaxWidth,
@@ -307,6 +308,31 @@ const TalkProviderEntrySchema = z
   })
   .catchall(z.unknown());
 
+const TalkRealtimeClientToolParametersSchema = z
+  .object({
+    type: z.literal("object"),
+    properties: z.record(z.string(), z.unknown()),
+    required: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+const TalkRealtimeClientToolSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    description: z.string().trim().min(1),
+    parameters: TalkRealtimeClientToolParametersSchema.optional(),
+  })
+  .strict()
+  .superRefine((tool, ctx) => {
+    if (REALTIME_VOICE_BUILTIN_TOOL_NAMES.some((name) => name === tool.name)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["name"],
+        message: `talk.realtime.clientTools name must not collide with built-in tool "${tool.name}"`,
+      });
+    }
+  });
+
 const TalkRealtimeSchema = z
   .object({
     provider: z.string().optional(),
@@ -324,6 +350,7 @@ const TalkRealtimeSchema = z
     reasoningEffort: z.string().min(1).optional(),
     brain: z.enum(["agent-consult", "direct-tools", "none"]).optional(),
     consultRouting: z.enum(["provider-direct", "force-agent-consult"]).optional(),
+    clientTools: z.array(TalkRealtimeClientToolSchema).optional(),
   })
   .strict()
   .superRefine((realtime, ctx) => {

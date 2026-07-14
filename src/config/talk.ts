@@ -10,6 +10,7 @@ import type {
   TalkConfig,
   TalkConfigResponse,
   TalkProviderConfig,
+  TalkRealtimeClientToolConfig,
   TalkRealtimeConfig,
 } from "./types.gateway.js";
 import type { OpenClawConfig } from "./types.openclaw.js";
@@ -112,6 +113,31 @@ function normalizeTalkProviders(value: unknown): Record<string, TalkProviderConf
   return Object.keys(providers).length > 0 ? providers : undefined;
 }
 
+function normalizeTalkRealtimeClientTools(
+  value: unknown,
+): TalkRealtimeClientToolConfig[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const tools: TalkRealtimeClientToolConfig[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const name = normalizeOptionalString(entry.name);
+    const description = normalizeOptionalString(entry.description);
+    if (!name || !description) {
+      continue;
+    }
+    tools.push({
+      name,
+      description,
+      ...(entry.parameters !== undefined ? { parameters: entry.parameters } : {}),
+    });
+  }
+  return tools.length > 0 ? tools : undefined;
+}
+
 function normalizeTalkRealtimeConfig(value: unknown): TalkRealtimeConfig | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -186,6 +212,10 @@ function normalizeTalkRealtimeConfig(value: unknown): TalkRealtimeConfig | undef
     source.consultRouting === "force-agent-consult"
   ) {
     normalized.consultRouting = source.consultRouting;
+  }
+  const clientTools = normalizeTalkRealtimeClientTools(source.clientTools);
+  if (clientTools) {
+    normalized.clientTools = clientTools;
   }
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }

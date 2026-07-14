@@ -620,6 +620,24 @@ const TalkProviderConfigSchema = Type.Object(talkProviderFieldSchemas, {
 });
 
 /** Realtime Talk defaults and provider selection stored in config. */
+const TalkRealtimeClientToolParametersSchema = Type.Object(
+  {
+    type: Type.Literal("object"),
+    properties: Type.Record(Type.String(), Type.Unknown()),
+    required: Type.Optional(Type.Array(Type.String())),
+  },
+  { additionalProperties: true },
+);
+
+const TalkRealtimeClientToolSchema = Type.Object(
+  {
+    name: NonEmptyString,
+    description: NonEmptyString,
+    parameters: Type.Optional(TalkRealtimeClientToolParametersSchema),
+  },
+  { additionalProperties: false },
+);
+
 const TalkRealtimeConfigSchema = Type.Object(
   {
     provider: Type.Optional(Type.String()),
@@ -639,6 +657,7 @@ const TalkRealtimeConfigSchema = Type.Object(
     consultRouting: Type.Optional(
       Type.Union([Type.Literal("provider-direct"), Type.Literal("force-agent-consult")]),
     ),
+    clientTools: Type.Optional(Type.Array(TalkRealtimeClientToolSchema)),
   },
   { additionalProperties: false },
 );

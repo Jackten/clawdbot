@@ -42,6 +42,7 @@ See [Configuration - agents](/gateway/config-agents) for:
   - `talk.speechLocale`: optional BCP 47 locale id for Talk speech recognition on iOS/macOS
   - `talk.silenceTimeoutMs`: when unset, Talk keeps the platform default pause window before sending the transcript (`700 ms on macOS and Android, 900 ms on iOS`)
   - `talk.realtime.consultRouting`: Gateway relay fallback for finalized realtime Talk transcripts that skip `openclaw_agent_consult`
+  - `talk.realtime.clientTools`: client-executed function tools exposed to the provider for Gateway-relayed realtime sessions; built-in consult/control names are reserved
 
 ## Tools and custom providers
 
