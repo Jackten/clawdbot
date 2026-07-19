@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { resolveExpiresAtMsFromDurationMs } from "@openclaw/normalization-core/number-coercion";
 import type { TalkRealtimeGatewayToolConfig } from "../config/types.gateway.js";
 import type { OpenClawConfig } from "../config/types.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { RealtimeVoiceProviderPlugin } from "../plugins/types.js";
 import {
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
@@ -29,6 +30,7 @@ import {
   type RealtimeVoiceTool,
   type RealtimeVoiceToolResultOptions,
 } from "../talk/provider-types.js";
+import { persistRealtimeVoiceTranscriptTurn } from "../talk/realtime-transcript-persistence.js";
 import {
   isLikelyRealtimeVoiceAssistantEchoTranscript,
   recordRealtimeVoiceTranscript,
@@ -62,6 +64,7 @@ const FORCED_CONSULT_FALLBACK_DELAY_MS = 200;
 const FORCED_CONSULT_RESULT_MAX_CHARS = 1_800;
 const GATEWAY_TOOL_TIMEOUT_MS = 12_000;
 const GATEWAY_TOOL_MAX_BUFFER_BYTES = 64 * 1024;
+const log = createSubsystemLogger("talk-realtime-relay");
 
 type TalkRealtimeGatewayToolExecOptions = {
   encoding: "utf8";
@@ -129,6 +132,7 @@ type RelaySession = {
   context: GatewayRequestContext;
   bridge: RealtimeVoiceBridgeSession;
   talk: TalkSessionController;
+  cfg: OpenClawConfig;
   sessionKey?: string;
   expiresAtMs: number;
   cleanupTimer: ReturnType<typeof setTimeout>;
@@ -136,7 +140,16 @@ type RelaySession = {
   activeAgentToolCalls: Map<string, string>;
   completedAgentToolCalls: Set<string>;
   forcedConsults: RealtimeVoiceForcedConsultCoordinator;
+  persistTranscript: boolean;
+  transcriptTurn: RelayTranscriptTurn;
   transcript: RealtimeVoiceTranscriptEntry[];
+};
+
+type RelayTranscriptTurn = {
+  id: string;
+  assistantText?: string;
+  consulted: boolean;
+  userText?: string;
 };
 
 type TalkRealtimeRelayIssue = {
@@ -175,6 +188,43 @@ type TalkRealtimeRelaySessionResult = {
 };
 
 const relaySessions = new Map<string, RelaySession>();
+
+function createRelayTranscriptTurn(): RelayTranscriptTurn {
+  return { id: randomUUID(), consulted: false };
+}
+
+function resetRelayTranscriptTurn(session: RelaySession): void {
+  session.transcriptTurn = createRelayTranscriptTurn();
+}
+
+function persistCompletedRelayTranscriptTurn(session: RelaySession): void {
+  const turn = session.transcriptTurn;
+  const userText = turn.userText?.trim();
+  const assistantText = turn.assistantText?.trim();
+  // Tool-call-only responses finish before the provider speaks its follow-up.
+  // Keep the user text until a response includes the final assistant transcript.
+  if (!assistantText) {
+    return;
+  }
+  resetRelayTranscriptTurn(session);
+  // Agent consults already write their complete turn through chat.send. Skipping
+  // the whole provider turn prevents the spoken consult result from being mirrored twice.
+  if (!session.persistTranscript || turn.consulted || !userText || !assistantText) {
+    return;
+  }
+  void persistRealtimeVoiceTranscriptTurn({
+    assistantText,
+    cfg: session.cfg,
+    sessionKey: session.sessionKey,
+    source: "talk",
+    timestamp: Date.now(),
+    turnId: `talk:${session.id}:${turn.id}`,
+    userText,
+  }).catch((error: unknown) => {
+    // Transcript persistence is deliberately detached from realtime audio delivery.
+    log.warn(`failed to persist realtime Talk transcript: ${formatError(error)}`);
+  });
+}
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -619,6 +669,12 @@ export function createTalkRealtimeRelaySession(
         });
         currentOutputItemId = undefined;
         currentOutputResponseId = undefined;
+        const relay = relayRef.current;
+        if (relay && event.type === "response.done") {
+          persistCompletedRelayTranscriptTurn(relay);
+        } else if (relay && event.type === "response.cancelled") {
+          resetRelayTranscriptTurn(relay);
+        }
       }
     },
     onTranscript: (role, text, final) => {
@@ -626,6 +682,12 @@ export function createTalkRealtimeRelaySession(
       const turnId = relay ? ensureRelayTurn(relay) : undefined;
       if (final && relay) {
         recordRealtimeVoiceTranscript(relay.transcript, role, text);
+        if (role === "assistant" && text.trim()) {
+          relay.transcriptTurn.assistantText = text.trim();
+          // Final transcripts are the provider-neutral completion signal. Some
+          // bridges do not emit OpenAI-style response lifecycle events.
+          persistCompletedRelayTranscriptTurn(relay);
+        }
       }
       const eventType =
         role === "assistant"
@@ -649,6 +711,9 @@ export function createTalkRealtimeRelaySession(
         const question = text.trim();
         if (isRelayAssistantEchoTranscript(relay, question)) {
           return;
+        }
+        if (relay) {
+          relay.transcriptTurn.userText = question;
         }
         if (
           relay &&
@@ -688,6 +753,7 @@ export function createTalkRealtimeRelaySession(
       const relay = relayRef.current;
       const turnId = relay ? ensureRelayTurn(relay) : undefined;
       if (relay && toolCall.name === REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
+        relay.transcriptTurn.consulted = true;
         const forcedConsult = relay.forcedConsults.recordNativeConsult(
           toolCall.args,
           toolCall.callId,
@@ -799,6 +865,7 @@ export function createTalkRealtimeRelaySession(
     context: params.context,
     bridge,
     talk,
+    cfg: params.cfg ?? {},
     sessionKey: params.sessionKey?.trim() || undefined,
     expiresAtMs,
     cleanupTimer: setTimeout(() => {
@@ -811,6 +878,8 @@ export function createTalkRealtimeRelaySession(
     activeAgentToolCalls: new Map(),
     completedAgentToolCalls: new Set(),
     forcedConsults: createRealtimeVoiceForcedConsultCoordinator(),
+    persistTranscript: params.cfg?.talk?.realtime?.persistTranscript === true,
+    transcriptTurn: createRelayTranscriptTurn(),
     transcript: [],
   };
   relayRef.current = relay;
@@ -871,6 +940,7 @@ function scheduleForcedAgentConsult(session: RelaySession | undefined, question:
     const callId = handle.id;
     const itemId = `forced-consult-item-${randomUUID()}`;
     session.forcedConsults.markStarted(handle);
+    session.transcriptTurn.consulted = true;
     session.bridge.handleBargeIn({ audioPlaybackActive: true, force: true });
     broadcastToOwner(session.context, session.connId, {
       relaySessionId: session.id,
@@ -1135,6 +1205,7 @@ export function cancelTalkRealtimeRelayTurn(params: {
   const turnId = ensureRelayTurn(session);
   const reason = params.reason ?? "client-cancelled";
   cancelForcedConsults(session);
+  resetRelayTranscriptTurn(session);
   session.bridge.handleBargeIn({ audioPlaybackActive: true });
   abortRelayAgentRuns(session, reason);
   const cancelled = session.talk.cancelTurn({

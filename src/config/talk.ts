@@ -243,6 +243,9 @@ function normalizeTalkRealtimeConfig(value: unknown): TalkRealtimeConfig | undef
   ) {
     normalized.consultRouting = source.consultRouting;
   }
+  if (typeof source.persistTranscript === "boolean") {
+    normalized.persistTranscript = source.persistTranscript;
+  }
   const clientTools = normalizeTalkRealtimeClientTools(source.clientTools);
   if (clientTools) {
     normalized.clientTools = clientTools;

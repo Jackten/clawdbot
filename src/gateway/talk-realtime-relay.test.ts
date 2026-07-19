@@ -8,6 +8,13 @@ import {
 } from "../agents/embedded-agent-runner/runs.js";
 import type { RealtimeVoiceProviderPlugin } from "../plugins/types.js";
 import type { RealtimeVoiceBridgeCreateRequest } from "../talk/provider-types.js";
+
+const transcriptPersistenceMocks = vi.hoisted(() => ({
+  persistRealtimeVoiceTranscriptTurn: vi.fn(async () => undefined),
+}));
+
+vi.mock("../talk/realtime-transcript-persistence.js", () => transcriptPersistenceMocks);
+
 import {
   cancelTalkRealtimeRelayTurn,
   clearTalkRealtimeRelaySessionsForTest,
@@ -24,6 +31,8 @@ describe("talk realtime gateway relay", () => {
     clearTalkRealtimeRelaySessionsForTest();
     vi.useRealTimers();
     embeddedRunTesting.resetActiveEmbeddedRuns();
+    transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn.mockReset();
+    transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn.mockResolvedValue(undefined);
   });
 
   function createIdleRelayProvider(): RealtimeVoiceProviderPlugin {
@@ -250,6 +259,149 @@ describe("talk realtime gateway relay", () => {
     });
     return { bridge, bridgeRequest: () => bridgeRequest, events, session };
   }
+
+  function createTranscriptPersistenceRelay(persistTranscript: boolean) {
+    let bridgeRequest: RealtimeVoiceBridgeCreateRequest | undefined;
+    const bridge = {
+      connect: vi.fn(async () => undefined),
+      sendAudio: vi.fn(),
+      setMediaTimestamp: vi.fn(),
+      handleBargeIn: vi.fn(),
+      submitToolResult: vi.fn(),
+      acknowledgeMark: vi.fn(),
+      close: vi.fn(),
+      isConnected: vi.fn(() => true),
+    };
+    const provider: RealtimeVoiceProviderPlugin = {
+      id: "relay-test",
+      label: "Relay Test",
+      isConfigured: () => true,
+      createBridge: (request) => {
+        bridgeRequest = request;
+        return bridge;
+      },
+    };
+    const session = createTalkRealtimeRelaySession({
+      context: { broadcastToConnIds: vi.fn() } as never,
+      connId: "conn-1",
+      cfg: { talk: { realtime: { persistTranscript } } },
+      provider,
+      providerConfig: {},
+      instructions: "brief",
+      tools: [],
+      sessionKey: "agent:main:main",
+    });
+    return { bridge, bridgeRequest: () => bridgeRequest, session };
+  }
+
+  it("persists one completed direct voice turn when enabled", async () => {
+    const fixture = createTranscriptPersistenceRelay(true);
+
+    fixture.bridgeRequest()?.onTranscript?.("user", "  What did we decide?  ", true);
+    fixture.bridgeRequest()?.onTranscript?.("assistant", "  We chose the blue option.  ", true);
+    fixture.bridgeRequest()?.onEvent?.({ direction: "server", type: "response.done" });
+    fixture.bridgeRequest()?.onEvent?.({ direction: "server", type: "response.done" });
+    await Promise.resolve();
+
+    expect(transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn).toHaveBeenCalledTimes(1);
+    expect(transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn).toHaveBeenCalledWith({
+      assistantText: "We chose the blue option.",
+      cfg: { talk: { realtime: { persistTranscript: true } } },
+      sessionKey: "agent:main:main",
+      source: "talk",
+      timestamp: expect.any(Number),
+      turnId: expect.stringMatching(/^talk:/),
+      userText: "What did we decide?",
+    });
+  });
+
+  it("persists when the provider emits final transcripts without response events", async () => {
+    const fixture = createTranscriptPersistenceRelay(true);
+
+    fixture.bridgeRequest()?.onTranscript?.("user", "Remember the provider-neutral path", true);
+    fixture.bridgeRequest()?.onTranscript?.("assistant", "Saved without response.done", true);
+    await Promise.resolve();
+
+    expect(transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn).toHaveBeenCalledTimes(1);
+    expect(transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assistantText: "Saved without response.done",
+        userText: "Remember the provider-neutral path",
+      }),
+    );
+  });
+
+  it("does not persist completed voice turns when disabled", async () => {
+    const fixture = createTranscriptPersistenceRelay(false);
+
+    fixture.bridgeRequest()?.onTranscript?.("user", "Remember this", true);
+    fixture.bridgeRequest()?.onTranscript?.("assistant", "I will", true);
+    fixture.bridgeRequest()?.onEvent?.({ direction: "server", type: "response.done" });
+    await Promise.resolve();
+
+    expect(transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn).not.toHaveBeenCalled();
+  });
+
+  it("keeps the user transcript across a tool-call-only response", async () => {
+    const fixture = createTranscriptPersistenceRelay(true);
+
+    fixture.bridgeRequest()?.onTranscript?.("user", "Check the calendar", true);
+    fixture.bridgeRequest()?.onToolCall?.({
+      itemId: "gateway-tool-item",
+      callId: "gateway-tool-call",
+      name: "calendar_lookup",
+      args: { query: "today" },
+    });
+    fixture.bridgeRequest()?.onEvent?.({ direction: "server", type: "response.done" });
+    fixture.bridgeRequest()?.onTranscript?.("assistant", "You have one meeting today.", true);
+    fixture.bridgeRequest()?.onEvent?.({ direction: "server", type: "response.done" });
+    await Promise.resolve();
+
+    expect(transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn).toHaveBeenCalledTimes(1);
+    expect(transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assistantText: "You have one meeting today.",
+        userText: "Check the calendar",
+      }),
+    );
+  });
+
+  it("does not double-persist a turn handled by agent consult", async () => {
+    const fixture = createTranscriptPersistenceRelay(true);
+
+    fixture.bridgeRequest()?.onTranscript?.("user", "Check the project", true);
+    fixture.bridgeRequest()?.onToolCall?.({
+      itemId: "consult-item",
+      callId: "consult-call",
+      name: "openclaw_agent_consult",
+      args: { question: "Check the project" },
+    });
+    fixture.bridgeRequest()?.onTranscript?.("assistant", "The project is on track.", true);
+    fixture.bridgeRequest()?.onEvent?.({ direction: "server", type: "response.done" });
+    await Promise.resolve();
+
+    expect(transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn).not.toHaveBeenCalled();
+  });
+
+  it("swallows transcript append failures without affecting the relay", async () => {
+    transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn.mockRejectedValueOnce(
+      new Error("session store unavailable"),
+    );
+    const fixture = createTranscriptPersistenceRelay(true);
+
+    fixture.bridgeRequest()?.onTranscript?.("user", "Keep talking", true);
+    fixture.bridgeRequest()?.onTranscript?.("assistant", "Still here", true);
+    fixture.bridgeRequest()?.onEvent?.({ direction: "server", type: "response.done" });
+    await Promise.resolve();
+    sendTalkRealtimeRelayAudio({
+      relaySessionId: fixture.session.relaySessionId,
+      connId: "conn-1",
+      audioBase64: Buffer.from("next-turn").toString("base64"),
+    });
+
+    expect(transcriptPersistenceMocks.persistRealtimeVoiceTranscriptTurn).toHaveBeenCalledTimes(1);
+    expect(fixture.bridge.sendAudio).toHaveBeenCalledWith(Buffer.from("next-turn"));
+  });
 
   it("bridges browser audio, transcripts, and tool results through a backend provider", async () => {
     let bridgeRequest: RealtimeVoiceBridgeCreateRequest | undefined;

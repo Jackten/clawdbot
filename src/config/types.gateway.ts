@@ -98,6 +98,8 @@ export type TalkRealtimeConfig = {
   brain?: "agent-consult" | "direct-tools" | "none";
   /** How Gateway relay handles final user transcripts when the provider skips a consult. */
   consultRouting?: "provider-direct" | "force-agent-consult";
+  /** Persist completed non-consult Gateway relay turns into the agent's main session. */
+  persistTranscript?: boolean;
   /** Client-executed tools exposed to Gateway-relayed realtime providers. */
   clientTools?: TalkRealtimeClientToolConfig[];
   /** Gateway-executed tools exposed to Gateway-relayed realtime providers. */

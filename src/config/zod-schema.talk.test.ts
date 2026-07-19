@@ -46,6 +46,16 @@ describe("OpenClawSchema talk validation", () => {
     ).not.toThrow();
   });
 
+  it.each([true, false])("accepts talk.realtime.persistTranscript=%s", (persistTranscript) => {
+    expect(() => OpenClawSchema.parse({ talk: { realtime: { persistTranscript } } })).not.toThrow();
+  });
+
+  it("rejects a non-boolean talk.realtime.persistTranscript", () => {
+    expect(() =>
+      OpenClawSchema.parse({ talk: { realtime: { persistTranscript: "yes" } } }),
+    ).toThrow(/persistTranscript|boolean/i);
+  });
+
   it("accepts realtime Talk voice detection and reasoning defaults", () => {
     expect(() =>
       OpenClawSchema.parse({
