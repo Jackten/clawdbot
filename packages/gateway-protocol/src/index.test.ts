@@ -338,6 +338,19 @@ describe("validateTalkConfigResult", () => {
                   },
                 },
               ],
+              gatewayTools: [
+                {
+                  name: "control_home",
+                  description: "Control Home Assistant.",
+                  parameters: {
+                    type: "object",
+                    properties: { command: { type: "string" } },
+                    required: ["command"],
+                  },
+                  exec: "/usr/local/bin/control-home",
+                  argKey: "command",
+                },
+              ],
             },
           },
         },

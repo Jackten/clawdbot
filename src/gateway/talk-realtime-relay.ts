@@ -1,7 +1,9 @@
 // Gateway Talk realtime relay.
 // Bridges browser Talk audio sessions with realtime voice provider plugins.
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolveExpiresAtMsFromDurationMs } from "@openclaw/normalization-core/number-coercion";
+import type { TalkRealtimeGatewayToolConfig } from "../config/types.gateway.js";
 import type { OpenClawConfig } from "../config/types.js";
 import type { RealtimeVoiceProviderPlugin } from "../plugins/types.js";
 import {
@@ -58,6 +60,23 @@ const RELAY_EVENT = "talk.event";
 const RELAY_TRANSCRIPT_ECHO_LOOKBACK_MS = 12_000;
 const FORCED_CONSULT_FALLBACK_DELAY_MS = 200;
 const FORCED_CONSULT_RESULT_MAX_CHARS = 1_800;
+const GATEWAY_TOOL_TIMEOUT_MS = 12_000;
+const GATEWAY_TOOL_MAX_BUFFER_BYTES = 64 * 1024;
+
+type TalkRealtimeGatewayToolExecOptions = {
+  encoding: "utf8";
+  env: NodeJS.ProcessEnv;
+  maxBuffer: number;
+  shell: false;
+  timeout: number;
+  windowsHide: true;
+};
+
+type TalkRealtimeGatewayToolRunner = (
+  executable: string,
+  args: readonly string[],
+  options: TalkRealtimeGatewayToolExecOptions,
+) => Promise<{ stdout: string }>;
 
 type TalkRealtimeRelayEventPayload =
   | { relaySessionId: string; type: "ready" }
@@ -137,6 +156,8 @@ type CreateTalkRealtimeRelaySessionParams = {
   providerConfig: RealtimeVoiceProviderConfig;
   instructions: string;
   tools: RealtimeVoiceTool[];
+  gatewayTools?: TalkRealtimeGatewayToolConfig[];
+  gatewayToolRunner?: TalkRealtimeGatewayToolRunner;
   model?: string;
   sessionKey?: string;
   voice?: string;
@@ -157,6 +178,37 @@ const relaySessions = new Map<string, RelaySession>();
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const runTalkRealtimeGatewayTool: TalkRealtimeGatewayToolRunner = (executable, args, options) =>
+  new Promise((resolve, reject) => {
+    execFile(executable, args, options, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve({ stdout });
+    });
+  });
+
+function formatGatewayToolExecutionError(error: unknown): string {
+  if (!error || typeof error !== "object") {
+    return "Gateway tool execution failed.";
+  }
+  const failure = error as { code?: unknown; killed?: unknown; signal?: unknown };
+  if (failure.killed === true && failure.signal === "SIGTERM") {
+    return `Gateway tool timed out after ${GATEWAY_TOOL_TIMEOUT_MS} ms.`;
+  }
+  if (failure.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+    return `Gateway tool output exceeded ${GATEWAY_TOOL_MAX_BUFFER_BYTES} bytes.`;
+  }
+  if (typeof failure.code === "number") {
+    return `Gateway tool exited with code ${failure.code}.`;
+  }
+  if (typeof failure.code === "string" && /^[A-Z0-9_]+$/.test(failure.code)) {
+    return `Gateway tool failed (${failure.code}).`;
+  }
+  return "Gateway tool execution failed.";
 }
 
 function realtimeRelayIssue(params: {
@@ -311,6 +363,54 @@ function broadcastToolResultToOwner(
   });
 }
 
+function submitGatewayToolResult(
+  session: RelaySession,
+  params: { callId: string; turnId: string; result: Record<string, string> },
+): void {
+  session.bridge.submitToolResult(params.callId, params.result, undefined);
+  broadcastToolResultToOwner(session, {
+    callId: params.callId,
+    turnId: params.turnId,
+    result: params.result,
+    final: true,
+  });
+}
+
+async function executeGatewayToolCall(params: {
+  session: RelaySession;
+  tool: TalkRealtimeGatewayToolConfig;
+  callId: string;
+  turnId: string;
+  argument: string;
+  runner: TalkRealtimeGatewayToolRunner;
+}): Promise<void> {
+  let result: Record<string, string>;
+  try {
+    const execution = await params.runner(params.tool.exec, [params.argument], {
+      encoding: "utf8",
+      env: process.env,
+      maxBuffer: GATEWAY_TOOL_MAX_BUFFER_BYTES,
+      shell: false,
+      timeout: GATEWAY_TOOL_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    result = { response: execution.stdout.trim() || "Done." };
+  } catch (error) {
+    result = { error: formatGatewayToolExecutionError(error) };
+  }
+
+  // The provider may close while the host command is running; only active relays still
+  // have a call to satisfy and an owner UI to update.
+  if (relaySessions.get(params.session.id) !== params.session) {
+    return;
+  }
+  submitGatewayToolResult(params.session, {
+    callId: params.callId,
+    turnId: params.turnId,
+    result,
+  });
+}
+
 function submitRelayAgentControlProviderResults(
   session: RelaySession,
   result: RealtimeVoiceAgentControlResult,
@@ -428,6 +528,10 @@ export function createTalkRealtimeRelaySession(
   let currentOutputResponseId: string | undefined;
   let ready = false;
   let failureEmitted = false;
+  const gatewayToolsByName = new Map(
+    (params.gatewayTools ?? []).map((tool) => [tool.name, tool] as const),
+  );
+  const gatewayToolRunner = params.gatewayToolRunner ?? runTalkRealtimeGatewayTool;
   const relayRef: { current?: RelaySession } = {};
   const bridge = createRealtimeVoiceBridgeSession({
     provider: params.provider,
@@ -597,6 +701,32 @@ export function createTalkRealtimeRelaySession(
           return;
         }
         submitRealtimeAgentConsultWorkingResponse(relay, toolCall.callId, turnId);
+      }
+      const gatewayTool = gatewayToolsByName.get(toolCall.name);
+      if (relay && gatewayTool) {
+        const argKey = gatewayTool.argKey ?? "command";
+        const argument =
+          toolCall.args && typeof toolCall.args === "object" && !Array.isArray(toolCall.args)
+            ? (toolCall.args as Record<string, unknown>)[argKey]
+            : undefined;
+        const gatewayTurnId = turnId ?? ensureRelayTurn(relay);
+        if (typeof argument !== "string") {
+          submitGatewayToolResult(relay, {
+            callId: toolCall.callId,
+            turnId: gatewayTurnId,
+            result: { error: `Gateway tool requires string argument "${argKey}".` },
+          });
+          return;
+        }
+        void executeGatewayToolCall({
+          session: relay,
+          tool: gatewayTool,
+          callId: toolCall.callId,
+          turnId: gatewayTurnId,
+          argument,
+          runner: gatewayToolRunner,
+        });
+        return;
       }
       emit(
         {

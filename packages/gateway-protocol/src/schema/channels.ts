@@ -638,6 +638,17 @@ const TalkRealtimeClientToolSchema = Type.Object(
   { additionalProperties: false },
 );
 
+const TalkRealtimeGatewayToolSchema = Type.Object(
+  {
+    name: NonEmptyString,
+    description: NonEmptyString,
+    parameters: Type.Optional(TalkRealtimeClientToolParametersSchema),
+    exec: NonEmptyString,
+    argKey: Type.Optional(NonEmptyString),
+  },
+  { additionalProperties: false },
+);
+
 const TalkRealtimeConfigSchema = Type.Object(
   {
     provider: Type.Optional(Type.String()),
@@ -658,6 +669,7 @@ const TalkRealtimeConfigSchema = Type.Object(
       Type.Union([Type.Literal("provider-direct"), Type.Literal("force-agent-consult")]),
     ),
     clientTools: Type.Optional(Type.Array(TalkRealtimeClientToolSchema)),
+    gatewayTools: Type.Optional(Type.Array(TalkRealtimeGatewayToolSchema)),
   },
   { additionalProperties: false },
 );

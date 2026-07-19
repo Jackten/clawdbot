@@ -12,6 +12,7 @@ import type {
   TalkProviderConfig,
   TalkRealtimeClientToolConfig,
   TalkRealtimeConfig,
+  TalkRealtimeGatewayToolConfig,
 } from "./types.gateway.js";
 import type { OpenClawConfig } from "./types.openclaw.js";
 import { coerceSecretRef } from "./types.secrets.js";
@@ -138,6 +139,35 @@ function normalizeTalkRealtimeClientTools(
   return tools.length > 0 ? tools : undefined;
 }
 
+function normalizeTalkRealtimeGatewayTools(
+  value: unknown,
+): TalkRealtimeGatewayToolConfig[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const tools: TalkRealtimeGatewayToolConfig[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const name = normalizeOptionalString(entry.name);
+    const description = normalizeOptionalString(entry.description);
+    const executable = normalizeOptionalString(entry.exec);
+    if (!name || !description || !executable) {
+      continue;
+    }
+    const argKey = normalizeOptionalString(entry.argKey);
+    tools.push({
+      name,
+      description,
+      ...(entry.parameters !== undefined ? { parameters: entry.parameters } : {}),
+      exec: executable,
+      ...(argKey ? { argKey } : {}),
+    });
+  }
+  return tools.length > 0 ? tools : undefined;
+}
+
 function normalizeTalkRealtimeConfig(value: unknown): TalkRealtimeConfig | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -216,6 +246,10 @@ function normalizeTalkRealtimeConfig(value: unknown): TalkRealtimeConfig | undef
   const clientTools = normalizeTalkRealtimeClientTools(source.clientTools);
   if (clientTools) {
     normalized.clientTools = clientTools;
+  }
+  const gatewayTools = normalizeTalkRealtimeGatewayTools(source.gatewayTools);
+  if (gatewayTools) {
+    normalized.gatewayTools = gatewayTools;
   }
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }

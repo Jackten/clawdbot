@@ -1455,6 +1455,19 @@ describe("talk.session unified handlers", () => {
                 providers: { openai: { apiKey: "openai-key" } },
                 instructions: "Speak warmly.",
                 consultRouting: "force-agent-consult",
+                gatewayTools: [
+                  {
+                    name: "control_home",
+                    description: "Control Home Assistant with a spoken command.",
+                    parameters: {
+                      type: "object",
+                      properties: { request: { type: "string" } },
+                      required: ["request"],
+                    },
+                    exec: "/usr/local/bin/control-home",
+                    argKey: "request",
+                  },
+                ],
                 clientTools: [
                   {
                     name: "phone_vibrate",
@@ -1501,9 +1514,20 @@ describe("talk.session unified handlers", () => {
     expect(relayTools.map((tool) => tool.name)).toEqual([
       "openclaw_agent_consult",
       "openclaw_agent_control",
+      "control_home",
       "phone_vibrate",
     ]);
     expect(relayTools[2]).toEqual({
+      type: "function",
+      name: "control_home",
+      description: "Control Home Assistant with a spoken command.",
+      parameters: {
+        type: "object",
+        properties: { request: { type: "string" } },
+        required: ["request"],
+      },
+    });
+    expect(relayTools[3]).toEqual({
       type: "function",
       name: "phone_vibrate",
       description: "Vibrate the phone with the requested pattern.",
@@ -1513,6 +1537,19 @@ describe("talk.session unified handlers", () => {
         required: ["pattern"],
       },
     });
+    expect(relayCreateInput.gatewayTools).toEqual([
+      {
+        name: "control_home",
+        description: "Control Home Assistant with a spoken command.",
+        parameters: {
+          type: "object",
+          properties: { request: { type: "string" } },
+          required: ["request"],
+        },
+        exec: "/usr/local/bin/control-home",
+        argKey: "request",
+      },
+    ]);
     expectRespondOk(createRespond, {
       sessionId: "relay-unified-1",
       relaySessionId: "relay-unified-1",

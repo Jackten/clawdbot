@@ -61,6 +61,19 @@ describe("talk normalization", () => {
             parameters: { type: "object", properties: {} },
           },
         ],
+        gatewayTools: [
+          {
+            name: " control_home ",
+            description: " Control Home Assistant. ",
+            parameters: {
+              type: "object",
+              properties: { command: { type: "string" } },
+              required: ["command"],
+            },
+            exec: " /usr/local/bin/control-home ",
+            argKey: " command ",
+          },
+        ],
       },
       interruptOnSpeech: true,
     });
@@ -96,6 +109,19 @@ describe("talk normalization", () => {
             name: "phone_vibrate",
             description: "Vibrate the phone.",
             parameters: { type: "object", properties: {} },
+          },
+        ],
+        gatewayTools: [
+          {
+            name: "control_home",
+            description: "Control Home Assistant.",
+            parameters: {
+              type: "object",
+              properties: { command: { type: "string" } },
+              required: ["command"],
+            },
+            exec: "/usr/local/bin/control-home",
+            argKey: "command",
           },
         ],
       },

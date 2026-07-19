@@ -43,6 +43,7 @@ See [Configuration - agents](/gateway/config-agents) for:
   - `talk.silenceTimeoutMs`: when unset, Talk keeps the platform default pause window before sending the transcript (`700 ms on macOS and Android, 900 ms on iOS`)
   - `talk.realtime.consultRouting`: Gateway relay fallback for finalized realtime Talk transcripts that skip `openclaw_agent_consult`
   - `talk.realtime.clientTools`: client-executed function tools exposed to the provider for Gateway-relayed realtime sessions; built-in consult/control names are reserved
+  - `talk.realtime.gatewayTools`: trusted-operator, unsandboxed host executables exposed as realtime tools; each host-native absolute `exec` path receives one string argument selected by `argKey` (default `command`), without a shell
 
 ## Tools and custom providers
 

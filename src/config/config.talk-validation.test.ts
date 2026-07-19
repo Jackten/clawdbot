@@ -135,4 +135,107 @@ describe("talk config validation fail-closed behavior", () => {
       /talk\.realtime\.clientTools|parameters|expected object/i,
     );
   });
+
+  it.each(["openclaw_agent_consult", "openclaw_agent_control"])(
+    "rejects talk.realtime.gatewayTools collision with built-in %s",
+    async (name) => {
+      await expectInvalidTalkConfig(
+        {
+          agents: { list: [{ id: "main" }] },
+          talk: {
+            realtime: {
+              gatewayTools: [
+                { name, description: "Replace a built-in tool.", exec: "/usr/bin/false" },
+              ],
+            },
+          },
+        },
+        /talk\.realtime\.gatewayTools|must not collide|built-in/i,
+      );
+    },
+  );
+
+  it.each([
+    [
+      "relative executable",
+      {
+        name: "control_home",
+        description: "Control Home Assistant.",
+        exec: "bin/control-home",
+      },
+      /gatewayTools|exec|absolute path/i,
+    ],
+    [
+      "non-object parameters",
+      {
+        name: "control_home",
+        description: "Control Home Assistant.",
+        parameters: ["not", "a", "schema"],
+        exec: "/usr/local/bin/control-home",
+      },
+      /gatewayTools|parameters|expected object/i,
+    ],
+    [
+      "empty argument key",
+      {
+        name: "control_home",
+        description: "Control Home Assistant.",
+        exec: "/usr/local/bin/control-home",
+        argKey: "   ",
+      },
+      /gatewayTools|argKey|too small/i,
+    ],
+  ])("rejects gateway tool with %s", async (_label, gatewayTool, messagePattern) => {
+    await expectInvalidTalkConfig(
+      {
+        agents: { list: [{ id: "main" }] },
+        talk: { realtime: { gatewayTools: [gatewayTool] } },
+      },
+      messagePattern as RegExp,
+    );
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "rejects a Windows absolute Gateway executable path on a POSIX host",
+    async () => {
+      await expectInvalidTalkConfig(
+        {
+          agents: { list: [{ id: "main" }] },
+          talk: {
+            realtime: {
+              gatewayTools: [
+                {
+                  name: "control_home",
+                  description: "Control Home Assistant.",
+                  exec: "C:\\tools\\control-home.exe",
+                },
+              ],
+            },
+          },
+        },
+        /gatewayTools|exec|absolute path/i,
+      );
+    },
+  );
+
+  it("rejects duplicate names across client and Gateway realtime tools", async () => {
+    await expectInvalidTalkConfig(
+      {
+        agents: { list: [{ id: "main" }] },
+        talk: {
+          realtime: {
+            clientTools: [{ name: "control_home", description: "Run on the phone." }],
+            gatewayTools: [
+              {
+                name: "control_home",
+                description: "Run on the Gateway.",
+                exec: "/usr/local/bin/control-home",
+              },
+            ],
+          },
+        },
+      },
+      /tool name|unique|clientTools|gatewayTools/i,
+    );
+  });
 });

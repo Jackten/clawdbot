@@ -60,6 +60,13 @@ export type TalkRealtimeClientToolConfig = {
   parameters?: unknown;
 };
 
+export type TalkRealtimeGatewayToolConfig = TalkRealtimeClientToolConfig & {
+  /** Absolute path to the executable run by the Gateway host. */
+  exec: string;
+  /** String argument property passed to the executable. Defaults to `command`. */
+  argKey?: string;
+};
+
 export type TalkRealtimeConfig = {
   /** Active realtime voice provider. */
   provider?: string;
@@ -93,6 +100,8 @@ export type TalkRealtimeConfig = {
   consultRouting?: "provider-direct" | "force-agent-consult";
   /** Client-executed tools exposed to Gateway-relayed realtime providers. */
   clientTools?: TalkRealtimeClientToolConfig[];
+  /** Gateway-executed tools exposed to Gateway-relayed realtime providers. */
+  gatewayTools?: TalkRealtimeGatewayToolConfig[];
 };
 
 export type ResolvedTalkConfig = {

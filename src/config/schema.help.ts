@@ -224,6 +224,19 @@ export const FIELD_HELP: Record<string, string> = {
     "Provider-facing description of when and how to call this client tool.",
   "talk.realtime.clientTools.*.parameters":
     "Optional object-shaped JSON Schema for the tool arguments. Omit it to use an empty object schema.",
+  "talk.realtime.gatewayTools":
+    "Gateway-executed function tools exposed to Gateway-relayed realtime Talk sessions. Each call runs only its configured executable path directly on the host without a shell; treat this unsandboxed surface as trusted operator configuration.",
+  "talk.realtime.gatewayTools.*": "One Gateway-executed realtime Talk function tool.",
+  "talk.realtime.gatewayTools.*.name":
+    "Provider-facing function name. Must not collide with openclaw_agent_consult or openclaw_agent_control.",
+  "talk.realtime.gatewayTools.*.description":
+    "Provider-facing description of when and how to call this Gateway tool.",
+  "talk.realtime.gatewayTools.*.parameters":
+    "Optional object-shaped JSON Schema for the tool arguments. Omit it to use an empty object schema.",
+  "talk.realtime.gatewayTools.*.exec":
+    "Host-native absolute path to the executable run directly by the Gateway without a shell.",
+  "talk.realtime.gatewayTools.*.argKey":
+    'Tool argument property whose string value is passed as the executable\'s only argument. Defaults to "command".',
   "talk.consultThinkingLevel":
     "Use this to override the thinking level for the regular agent run behind Talk realtime consults.",
   "talk.consultFastMode":

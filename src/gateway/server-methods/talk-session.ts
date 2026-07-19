@@ -17,7 +17,10 @@ import {
   validateTalkSessionSubmitToolResultParams,
   validateTalkSessionTurnParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import type { TalkRealtimeClientToolConfig } from "../../config/types.gateway.js";
+import type {
+  TalkRealtimeClientToolConfig,
+  TalkRealtimeGatewayToolConfig,
+} from "../../config/types.gateway.js";
 import { resolveRealtimeVoiceAgentConsultTools } from "../../talk/agent-consult-tool.js";
 import { REALTIME_VOICE_AGENT_CONTROL_TOOL } from "../../talk/agent-run-control-shared.js";
 import { controlRealtimeVoiceAgentRun } from "../../talk/agent-run-control.js";
@@ -82,8 +85,9 @@ type ManagedRoomTalkSession = Extract<UnifiedTalkSessionRecord, { kind: "managed
 
 function buildTalkRealtimeRelayTools(
   clientTools: TalkRealtimeClientToolConfig[] | undefined,
+  gatewayTools: TalkRealtimeGatewayToolConfig[] | undefined,
 ): RealtimeVoiceTool[] {
-  const configuredTools = (clientTools ?? []).map(
+  const configuredTools = [...(gatewayTools ?? []), ...(clientTools ?? [])].map(
     (tool): RealtimeVoiceTool => ({
       type: "function",
       name: tool.name,
@@ -354,7 +358,11 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
           provider: resolution.provider,
           providerConfig: withRealtimeBrowserOverrides(resolution.providerConfig, launchOptions),
           instructions: buildRealtimeInstructions(realtimeConfig.instructions),
-          tools: buildTalkRealtimeRelayTools(realtimeConfig.clientTools),
+          tools: buildTalkRealtimeRelayTools(
+            realtimeConfig.clientTools,
+            realtimeConfig.gatewayTools,
+          ),
+          gatewayTools: realtimeConfig.gatewayTools,
           model: launchOptions.model,
           sessionKey: normalizeOptionalString(params.sessionKey),
           voice: launchOptions.voice,

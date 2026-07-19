@@ -1,5 +1,6 @@
-import { isHttpsUrl, isHttpUrl } from "@openclaw/net-policy/url-protocol";
 // Assembles the canonical Zod schema for OpenClaw config parsing.
+import path from "node:path";
+import { isHttpsUrl, isHttpUrl } from "@openclaw/net-policy/url-protocol";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeStringifiedOptionalString,
@@ -333,6 +334,32 @@ const TalkRealtimeClientToolSchema = z
     }
   });
 
+const TalkRealtimeGatewayToolSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    description: z.string().trim().min(1),
+    parameters: TalkRealtimeClientToolParametersSchema.optional(),
+    exec: z
+      .string()
+      .trim()
+      .min(1)
+      .refine(
+        (value) => path.isAbsolute(value),
+        "talk.realtime.gatewayTools exec must be an absolute path",
+      ),
+    argKey: z.string().trim().min(1).optional(),
+  })
+  .strict()
+  .superRefine((tool, ctx) => {
+    if (REALTIME_VOICE_BUILTIN_TOOL_NAMES.some((name) => name === tool.name)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["name"],
+        message: `talk.realtime.gatewayTools name must not collide with built-in tool "${tool.name}"`,
+      });
+    }
+  });
+
 const TalkRealtimeSchema = z
   .object({
     provider: z.string().optional(),
@@ -351,6 +378,7 @@ const TalkRealtimeSchema = z
     brain: z.enum(["agent-consult", "direct-tools", "none"]).optional(),
     consultRouting: z.enum(["provider-direct", "force-agent-consult"]).optional(),
     clientTools: z.array(TalkRealtimeClientToolSchema).optional(),
+    gatewayTools: z.array(TalkRealtimeGatewayToolSchema).optional(),
   })
   .strict()
   .superRefine((realtime, ctx) => {
@@ -372,6 +400,25 @@ const TalkRealtimeSchema = z
         message:
           "talk.realtime.provider is required when talk.realtime.providers defines multiple providers",
       });
+    }
+
+    const configuredToolNames = new Map<string, string>();
+    for (const [toolGroup, tools] of [
+      ["clientTools", realtime.clientTools],
+      ["gatewayTools", realtime.gatewayTools],
+    ] as const) {
+      for (const [index, tool] of (tools ?? []).entries()) {
+        const previousGroup = configuredToolNames.get(tool.name);
+        if (previousGroup) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [toolGroup, index, "name"],
+            message: `talk.realtime tool name "${tool.name}" must be unique across clientTools and gatewayTools (already used by ${previousGroup})`,
+          });
+          continue;
+        }
+        configuredToolNames.set(tool.name, toolGroup);
+      }
     }
   });
 

@@ -200,6 +200,57 @@ describe("talk realtime gateway relay", () => {
     expectRecordFields(mockCallArg(mock, 0, 2), { runId: "run-1", state: "aborted" });
   }
 
+  function createGatewayToolRelayFixture(gatewayToolRunner: ReturnType<typeof vi.fn>) {
+    let bridgeRequest: RealtimeVoiceBridgeCreateRequest | undefined;
+    const bridge = {
+      connect: vi.fn(async () => undefined),
+      sendAudio: vi.fn(),
+      setMediaTimestamp: vi.fn(),
+      handleBargeIn: vi.fn(),
+      submitToolResult: vi.fn(),
+      acknowledgeMark: vi.fn(),
+      close: vi.fn(),
+      isConnected: vi.fn(() => true),
+    };
+    const provider: RealtimeVoiceProviderPlugin = {
+      id: "relay-test",
+      label: "Relay Test",
+      isConfigured: () => true,
+      createBridge: (request) => {
+        bridgeRequest = request;
+        return bridge;
+      },
+    };
+    const events: Array<{ payload: unknown }> = [];
+    const context = {
+      broadcastToConnIds: (_event: string, payload: unknown) => {
+        events.push({ payload });
+      },
+    } as never;
+    const session = createTalkRealtimeRelaySession({
+      context,
+      connId: "conn-1",
+      provider,
+      providerConfig: {},
+      instructions: "brief",
+      tools: [],
+      gatewayTools: [
+        {
+          name: "control_home",
+          description: "Control Home Assistant.",
+          parameters: {
+            type: "object",
+            properties: { command: { type: "string" } },
+            required: ["command"],
+          },
+          exec: "/usr/local/bin/control-home",
+        },
+      ],
+      gatewayToolRunner,
+    });
+    return { bridge, bridgeRequest: () => bridgeRequest, events, session };
+  }
+
   it("bridges browser audio, transcripts, and tool results through a backend provider", async () => {
     let bridgeRequest: RealtimeVoiceBridgeCreateRequest | undefined;
     const bridge = {
@@ -519,6 +570,111 @@ describe("talk realtime gateway relay", () => {
       reason: "completed",
     });
     expectRecordFields(closePayload.talkEvent, { type: "session.closed", final: true });
+  });
+
+  it("executes a configured Gateway tool and keeps other tool calls on the client path", async () => {
+    const gatewayToolRunner = vi.fn(async () => ({ stdout: "  Kitchen lights are on.\n" }));
+    const fixture = createGatewayToolRelayFixture(gatewayToolRunner);
+
+    fixture.bridgeRequest()?.onToolCall?.({
+      itemId: "gateway-item",
+      callId: "gateway-call",
+      name: "control_home",
+      args: { command: "turn on the kitchen lights" },
+    });
+
+    await vi.waitFor(() => expect(fixture.bridge.submitToolResult).toHaveBeenCalledTimes(1));
+    expect(gatewayToolRunner).toHaveBeenCalledWith(
+      "/usr/local/bin/control-home",
+      ["turn on the kitchen lights"],
+      {
+        encoding: "utf8",
+        env: process.env,
+        maxBuffer: 64 * 1024,
+        shell: false,
+        timeout: 12_000,
+        windowsHide: true,
+      },
+    );
+    expect(fixture.bridge.submitToolResult).toHaveBeenCalledWith(
+      "gateway-call",
+      { response: "Kitchen lights are on." },
+      undefined,
+    );
+    expect(
+      fixture.events.some((entry) => {
+        const payload = entry.payload as Record<string, unknown>;
+        return payload.type === "toolCall" && payload.callId === "gateway-call";
+      }),
+    ).toBe(false);
+    const resultEvent = findEventPayload(
+      fixture.events,
+      (payload) => payload.type === "toolResult" && payload.callId === "gateway-call",
+    );
+    expectRecordFields(resultEvent.talkEvent, {
+      type: "tool.result",
+      callId: "gateway-call",
+      payload: { result: { response: "Kitchen lights are on." } },
+      final: true,
+    });
+
+    fixture.bridgeRequest()?.onToolCall?.({
+      itemId: "client-item",
+      callId: "client-call",
+      name: "phone_vibrate",
+      args: { pattern: "success" },
+    });
+    const clientCall = findEventPayload(
+      fixture.events,
+      (payload) => payload.type === "toolCall" && payload.callId === "client-call",
+    );
+    expectRecordFields(clientCall, {
+      name: "phone_vibrate",
+      args: { pattern: "success" },
+    });
+  });
+
+  it.each([
+    ["missing", {}],
+    ["non-string", { command: 42 }],
+  ])("submits an error without execution for a %s Gateway tool argument", (_label, args) => {
+    const gatewayToolRunner = vi.fn();
+    const fixture = createGatewayToolRelayFixture(gatewayToolRunner);
+
+    fixture.bridgeRequest()?.onToolCall?.({
+      itemId: "gateway-item",
+      callId: "gateway-call",
+      name: "control_home",
+      args,
+    });
+
+    expect(gatewayToolRunner).not.toHaveBeenCalled();
+    expect(fixture.bridge.submitToolResult).toHaveBeenCalledWith(
+      "gateway-call",
+      { error: 'Gateway tool requires string argument "command".' },
+      undefined,
+    );
+  });
+
+  it.each([
+    ["nonzero exit", Object.assign(new Error("failed"), { code: 2 })],
+    ["timeout", Object.assign(new Error("timed out"), { killed: true, signal: "SIGTERM" })],
+  ])("submits an error when Gateway tool execution ends with %s", async (_label, error) => {
+    const gatewayToolRunner = vi.fn(() => Promise.reject(error));
+    const fixture = createGatewayToolRelayFixture(gatewayToolRunner);
+
+    fixture.bridgeRequest()?.onToolCall?.({
+      itemId: "gateway-item",
+      callId: "gateway-call",
+      name: "control_home",
+      args: { command: "turn off the lights" },
+    });
+
+    await vi.waitFor(() => expect(fixture.bridge.submitToolResult).toHaveBeenCalledTimes(1));
+    const submitted = mockCallArg(fixture.bridge.submitToolResult, 0, 1) as Record<string, unknown>;
+    expect(submitted.error).toMatch(
+      error && typeof error === "object" && "killed" in error ? /timed out/i : /code 2/i,
+    );
   });
 
   it("emits generic issue details when relay connect fails", async () => {
