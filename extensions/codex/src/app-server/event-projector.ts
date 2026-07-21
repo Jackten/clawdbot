@@ -26,6 +26,7 @@ import { generatedImageAssetFromBase64 } from "openclaw/plugin-sdk/image-generat
 import type { AssistantMessage, Usage } from "openclaw/plugin-sdk/llm";
 import { saveMediaBuffer } from "openclaw/plugin-sdk/media-store";
 import { asDateTimestampMs } from "openclaw/plugin-sdk/number-runtime";
+import { isSilentReplyText, SILENT_REPLY_TOKEN } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveCodexToolAbortTerminalReason } from "./dynamic-tool-execution.js";
 import { resolveCodexLocalRuntimeAttribution } from "./local-runtime-attribution.js";
 import {
@@ -2287,6 +2288,16 @@ export class CodexAppServerEventProjector {
   }
 
   private resolveFinalAssistantTextItem(): { itemId: string; text: string } | undefined {
+    // A trailing exact silent-reply token (e.g. the contract-mandated NO_REPLY
+    // answer to a late-injected internal event such as a duplicate subagent
+    // completion) silences only its own mini-turn. It must not shadow an
+    // earlier undelivered final answer emitted in the same turn — otherwise a
+    // completed run's real answer is dropped and the channel goes silent
+    // (BUG-166, HOA silent-success 2026-07-21). Skip trailing silent items
+    // while walking backward; return the most recent silent item only when the
+    // whole turn was deliberately silent (preserves the message-tool + NO_REPLY
+    // contract, whose only non-commentary item is the token itself).
+    let trailingSilentItem: { itemId: string; text: string } | undefined;
     for (let i = this.assistantItemOrder.length - 1; i >= 0; i -= 1) {
       const itemId = this.assistantItemOrder[i];
       if (!itemId) {
@@ -2297,10 +2308,14 @@ export class CodexAppServerEventProjector {
         continue;
       }
       if (text && !this.toolProgressTexts.has(text)) {
+        if (isSilentReplyText(text, SILENT_REPLY_TOKEN)) {
+          trailingSilentItem ??= { itemId, text };
+          continue;
+        }
         return { itemId, text };
       }
     }
-    return undefined;
+    return trailingSilentItem;
   }
 
   private rememberAssistantItem(itemId: string): void {
@@ -2537,7 +2552,6 @@ function readNonNegativeInteger(record: JsonObject, key: string): number | undef
   const value = readNumber(record, key);
   return value !== undefined && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
-
 
 function readCodexErrorNotificationMessage(record: JsonObject): string | undefined {
   const error = record.error;

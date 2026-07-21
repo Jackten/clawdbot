@@ -4790,4 +4790,76 @@ describe("CodexAppServerEventProjector", () => {
     expect(started.eventName).toBe("sessionStart");
     expect(started.scope).toBe("thread");
   });
+
+  // BUG-166 (HOA silent-success): a contract-mandated NO_REPLY answering a
+  // late-injected internal event must not shadow the real final answer emitted
+  // earlier in the same turn.
+  it("recovers the earlier final answer when a trailing NO_REPLY follows it in the same turn", async () => {
+    const projector = await createProjector();
+
+    await projector.handleNotification(
+      forCurrentTurn("item/started", {
+        item: { type: "agentMessage", id: "msg-answer", phase: "final_answer", text: "" },
+      }),
+    );
+    await projector.handleNotification(agentMessageDelta("The real answer.", "msg-answer"));
+    await projector.handleNotification(
+      forCurrentTurn("item/started", {
+        item: { type: "agentMessage", id: "msg-silent", phase: "final_answer", text: "" },
+      }),
+    );
+    await projector.handleNotification(agentMessageDelta("NO_REPLY", "msg-silent"));
+    await projector.handleNotification(
+      turnCompleted([
+        { type: "agentMessage", id: "msg-answer", text: "The real answer." },
+        { type: "agentMessage", id: "msg-silent", text: "NO_REPLY" },
+      ]),
+    );
+
+    const result = projector.buildResult(buildEmptyToolTelemetry());
+    expect(result.assistantTexts).toEqual(["The real answer."]);
+  });
+
+  it("keeps a deliberately silent turn silent when NO_REPLY is the only deliverable item", async () => {
+    const projector = await createProjector();
+
+    await projector.handleNotification(
+      forCurrentTurn("item/started", {
+        item: { type: "agentMessage", id: "msg-silent", phase: "final_answer", text: "" },
+      }),
+    );
+    await projector.handleNotification(agentMessageDelta("NO_REPLY", "msg-silent"));
+    await projector.handleNotification(
+      turnCompleted([{ type: "agentMessage", id: "msg-silent", text: "NO_REPLY" }]),
+    );
+
+    const result = projector.buildResult(buildEmptyToolTelemetry());
+    expect(result.assistantTexts).toEqual(["NO_REPLY"]);
+  });
+
+  it("does not surface commentary when a trailing NO_REPLY ends a turn with only commentary before it", async () => {
+    const projector = await createProjector();
+
+    await projector.handleNotification(
+      forCurrentTurn("item/started", {
+        item: { type: "agentMessage", id: "msg-progress", phase: "commentary", text: "" },
+      }),
+    );
+    await projector.handleNotification(agentMessageDelta("Working on it…", "msg-progress"));
+    await projector.handleNotification(
+      forCurrentTurn("item/started", {
+        item: { type: "agentMessage", id: "msg-silent", phase: "final_answer", text: "" },
+      }),
+    );
+    await projector.handleNotification(agentMessageDelta("NO_REPLY", "msg-silent"));
+    await projector.handleNotification(
+      turnCompleted([
+        { type: "agentMessage", id: "msg-progress", phase: "commentary", text: "Working on it…" },
+        { type: "agentMessage", id: "msg-silent", text: "NO_REPLY" },
+      ]),
+    );
+
+    const result = projector.buildResult(buildEmptyToolTelemetry());
+    expect(result.assistantTexts).toEqual(["NO_REPLY"]);
+  });
 });
