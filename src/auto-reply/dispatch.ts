@@ -103,14 +103,24 @@ function resolveForegroundReplyFenceKey(finalized: FinalizedMsgContext): string 
     return undefined;
   }
 
+  const chatType = normalizeChatType(finalized.ChatType) ?? "unknown";
+  const groupMessageId =
+    chatType === "group"
+      ? (normalizeForegroundReplyFencePart(finalized.MessageSidFull) ??
+        normalizeForegroundReplyFencePart(finalized.MessageSid) ??
+        normalizeForegroundReplyFencePart(finalized.MessageSidFirst) ??
+        normalizeForegroundReplyFencePart(finalized.MessageSidLast))
+      : undefined;
+
   // JSON keeps the composite key unambiguous across account/session/channel ids.
   return JSON.stringify([
     "foreground",
     channel,
     normalizeForegroundReplyFencePart(finalized.AccountId) ?? "default",
     sessionKey,
-    normalizeChatType(finalized.ChatType) ?? "unknown",
+    chatType,
     target,
+    ...(groupMessageId ? [groupMessageId] : []),
   ]);
 }
 

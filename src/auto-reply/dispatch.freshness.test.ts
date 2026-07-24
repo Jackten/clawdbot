@@ -94,7 +94,7 @@ describe("foreground reply freshness", () => {
     resetGlobalHookRunner();
   });
 
-  it("suppresses an older foreground final after a newer inbound event starts for the same session target", async () => {
+  it("suppresses an older direct-chat final after a newer inbound event starts for the same session target", async () => {
     const deliveries: Delivery[] = [];
     const cancellationReasons: Array<string | undefined> = [];
     const olderStarted = createDeferred<void>();
@@ -147,6 +147,61 @@ describe("foreground reply freshness", () => {
     });
     expect(deliveries).toEqual([{ kind: "final", text: "new final" }]);
     expect(cancellationReasons).toEqual(["stale-foreground"]);
+  });
+
+  it("keeps distinct group-message finals isolated even when they share a sender and target", async () => {
+    const deliveries: Delivery[] = [];
+    const olderStarted = createDeferred<void>();
+    const releaseOlderFinal = createDeferred<void>();
+
+    hoisted.dispatchReplyFromConfigMock.mockImplementation(
+      async (params: DispatchReplyFromConfigParams) => {
+        if (params.ctx.MessageSid === "old-group-message") {
+          olderStarted.resolve();
+          await releaseOlderFinal.promise;
+          params.dispatcher.sendFinalReply({ text: "old group final" });
+          return queuedFinalResult();
+        }
+        if (params.ctx.MessageSid === "new-group-message") {
+          params.dispatcher.sendFinalReply({ text: "new group final" });
+          return queuedFinalResult();
+        }
+        throw new Error(`unexpected test message ${params.ctx.MessageSid ?? "<missing>"}`);
+      },
+    );
+
+    const groupCtx = {
+      SessionKey: "agent:main:whatsapp:group:room",
+      ChatType: "group" as const,
+      OriginatingTo: "whatsapp:group-room",
+      From: "whatsapp:+1000",
+    };
+    const olderDispatch = dispatchWithDeliveries(
+      buildForegroundCtx({ ...groupCtx, MessageSid: "old-group-message" }),
+      deliveries,
+    );
+    await olderStarted.promise;
+
+    const newerResult = await dispatchWithDeliveries(
+      buildForegroundCtx({ ...groupCtx, MessageSid: "new-group-message" }),
+      deliveries,
+    );
+
+    releaseOlderFinal.resolve();
+    const olderResult = await olderDispatch;
+
+    expect(newerResult).toEqual({
+      queuedFinal: true,
+      counts: { tool: 0, block: 0, final: 1 },
+    });
+    expect(olderResult).toEqual({
+      queuedFinal: true,
+      counts: { tool: 0, block: 0, final: 1 },
+    });
+    expect(deliveries).toEqual([
+      { kind: "final", text: "new group final" },
+      { kind: "final", text: "old group final" },
+    ]);
   });
 
   it("leaves configured beforeDeliver cancellations untagged", async () => {
