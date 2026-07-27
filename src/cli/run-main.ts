@@ -206,7 +206,8 @@ async function tryRunGatewayRunFastPath(
       }
       return prepared;
     });
-    if (!shouldBootstrap) {
+    const gatewayMigrationGuard = beforeStateMigrations;
+    if (!shouldBootstrap || !gatewayMigrationGuard) {
       return;
     }
     await startupTrace.measure("gateway-run-bootstrap", async () => {
@@ -215,8 +216,12 @@ async function tryRunGatewayRunFastPath(
         commandPath,
         startupPolicy,
         loadPlugins: false,
-        ...(beforeStateMigrations ? { beforeStateMigrations } : {}),
+        beforeStateMigrations: gatewayMigrationGuard,
       });
+      // The fast config guard stays plugin-free; the starting gateway owns the
+      // plugin-aware migration pass that completes the startup checkpoint.
+      const { runGatewayStartupMigrations } = await import("./gateway-cli/startup-migrations.js");
+      await runGatewayStartupMigrations({ beforeStateMigrations: gatewayMigrationGuard });
       const { reloadTrustedGatewayRunEnvironment } = await import("./gateway-cli/pre-bootstrap.js");
       await reloadTrustedGatewayRunEnvironment({ runtime: defaultRuntime });
     });

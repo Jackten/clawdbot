@@ -13,6 +13,7 @@ import type { ConfigFileSnapshot, LegacyConfigIssue } from "../config/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import type { StartupMigrationLease } from "../infra/startup-migration-checkpoint.js";
+import type { PluginRuntimeMode } from "../plugins/plugin-runtime-mode.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { resolveHomeDir } from "../utils.js";
 import { noteIncludeConfinementWarning } from "./doctor-config-analysis.js";
@@ -75,19 +76,21 @@ export type DoctorConfigPreflightResult = {
 
 function collectDoctorLegacyIssues(
   snapshot: Awaited<ReturnType<typeof readConfigFileSnapshot>>,
+  pluginRuntime: PluginRuntimeMode,
 ): LegacyConfigIssue[] {
   if (!snapshot.exists) {
     return [];
   }
   const resolvedRaw = snapshot.sourceConfig ?? snapshot.config ?? {};
   const sourceRaw = snapshot.parsed ?? resolvedRaw;
-  return findDoctorLegacyConfigIssues(resolvedRaw, sourceRaw);
+  return findDoctorLegacyConfigIssues(resolvedRaw, sourceRaw, undefined, pluginRuntime);
 }
 
 function addDoctorLegacyIssues(
   snapshot: Awaited<ReturnType<typeof readConfigFileSnapshot>>,
+  pluginRuntime: PluginRuntimeMode,
 ): Awaited<ReturnType<typeof readConfigFileSnapshot>> {
-  const legacyIssues = collectDoctorLegacyIssues(snapshot);
+  const legacyIssues = collectDoctorLegacyIssues(snapshot, pluginRuntime);
   if (legacyIssues.length === 0) {
     return snapshot;
   }
@@ -181,14 +184,16 @@ export async function runDoctorConfigPreflight(
     /** Return false or reject on config drift; the preflight always unwinds owned resources. */
     beforeStateMigrations?: (snapshot?: ConfigFileSnapshot) => Promise<boolean>;
     requireStartupMigrationCheckpoint?: boolean;
+    pluginRuntime?: PluginRuntimeMode;
   } = {},
 ): Promise<DoctorConfigPreflightResult> {
+  const pluginRuntime = options.pluginRuntime ?? "full";
   const stateMigrations =
     options.migrateState !== false ? await loadDoctorStateMigrations() : undefined;
-  const startupCheckpoint =
-    options.requireStartupMigrationCheckpoint === true
-      ? await import("../infra/startup-migration-checkpoint.js")
-      : undefined;
+  const requireStartupMigrationCheckpoint = options.requireStartupMigrationCheckpoint === true;
+  const startupCheckpoint = requireStartupMigrationCheckpoint
+    ? await import("../infra/startup-migration-checkpoint.js")
+    : undefined;
   let startupMigrationEnv = process.env;
   let shouldRecordStartupCheckpoint = false;
   let startupMigrationLease: StartupMigrationLease | undefined;
@@ -210,16 +215,19 @@ export async function runDoctorConfigPreflight(
       stateMigrations === undefined ||
       options.beforeStateMigrations === undefined ||
       (await options.beforeStateMigrations());
-    if (startupCheckpoint && !stateMigrationsAllowed) {
+    if (requireStartupMigrationCheckpoint && !stateMigrationsAllowed) {
       throwStartupMigrationGuardRejected();
     }
     if (startupCheckpoint) {
       // Later config reads can apply state selectors. Pin the accepted lease target for its lifetime.
       startupMigrationEnv = cloneEnvWithPlatformSemantics(process.env);
-      shouldRecordStartupCheckpoint = startupCheckpoint.needsStartupMigrationCheckpoint({
+      const needsStartupCheckpoint = startupCheckpoint.needsStartupMigrationCheckpoint({
         env: startupMigrationEnv,
       });
-      startupMigrationLease = shouldRecordStartupCheckpoint
+      // Plugin-free startup still leases core mutations, but cannot prove plugin-owned
+      // convergence complete and must not stamp the process-wide full checkpoint.
+      shouldRecordStartupCheckpoint = needsStartupCheckpoint && pluginRuntime === "full";
+      startupMigrationLease = needsStartupCheckpoint
         ? startupCheckpoint.acquireStartupMigrationLease({ env: startupMigrationEnv })
         : undefined;
       if (startupMigrationLease) {
@@ -248,15 +256,16 @@ export async function runDoctorConfigPreflight(
 
     const readOptions = {
       skipPluginValidation: shouldSkipPluginValidationForDoctorConfigPreflight(),
+      pluginRuntime,
     };
-    let snapshot = addDoctorLegacyIssues(await readConfigFileSnapshot(readOptions));
+    let snapshot = addDoctorLegacyIssues(await readConfigFileSnapshot(readOptions), pluginRuntime);
     if (options.repairPrefixedConfig === true && snapshot.exists && !snapshot.valid) {
       if (await recoverConfigFromJsonRootSuffix(snapshot)) {
         note(
           "Removed non-JSON prefix from openclaw.json; original saved as .clobbered.*.",
           "Config",
         );
-        snapshot = addDoctorLegacyIssues(await readConfigFileSnapshot(readOptions));
+        snapshot = addDoctorLegacyIssues(await readConfigFileSnapshot(readOptions), pluginRuntime);
       } else if (
         await recoverConfigFromLastKnownGood({ snapshot, reason: "doctor-invalid-config" })
       ) {
@@ -264,7 +273,7 @@ export async function runDoctorConfigPreflight(
           "Restored openclaw.json from last-known-good; original saved as .clobbered.*.",
           "Config",
         );
-        snapshot = addDoctorLegacyIssues(await readConfigFileSnapshot(readOptions));
+        snapshot = addDoctorLegacyIssues(await readConfigFileSnapshot(readOptions), pluginRuntime);
       }
     }
     const invalidConfigNote =
@@ -291,7 +300,7 @@ export async function runDoctorConfigPreflight(
       !stateMigrationsAllowed ||
       options.beforeStateMigrations === undefined ||
       (await options.beforeStateMigrations(snapshot));
-    if (startupCheckpoint && !freshConfigGuardAllowed) {
+    if (requireStartupMigrationCheckpoint && !freshConfigGuardAllowed) {
       throwStartupMigrationGuardRejected();
     }
     if (stateMigrations && stateMigrationsAllowed && freshConfigGuardAllowed) {
@@ -315,6 +324,7 @@ export async function runDoctorConfigPreflight(
                 : {}),
               env: process.env,
               recoverCorruptTargetStore: options.recoverCorruptTargetStore,
+              ...(options.pluginRuntime ? { pluginRuntime: options.pluginRuntime } : {}),
             }),
           );
         } else if (stateMigrationInput.pluginDoctorConfig) {
@@ -322,6 +332,7 @@ export async function runDoctorConfigPreflight(
             await autoMigrateLegacyPluginDoctorState({
               config: stateMigrationInput.pluginDoctorConfig,
               env: process.env,
+              ...(options.pluginRuntime ? { pluginRuntime: options.pluginRuntime } : {}),
             }),
           );
           noteStartupStateMigrationResult(
@@ -335,22 +346,29 @@ export async function runDoctorConfigPreflight(
       }
     }
 
+    if (startupMigrationHeartbeatError) {
+      throw startupMigrationHeartbeatError instanceof Error
+        ? startupMigrationHeartbeatError
+        : new Error("OpenClaw startup migration lease heartbeat failed.");
+    }
+    if (startupMigrationLease && startupMigrationWarnings.length > 0) {
+      // The plugin-free gateway phase can consume one-shot core migration checks.
+      // Block here so its warnings cannot disappear before the full checkpoint pass.
+      throw new Error(
+        formatStartupMigrationFailure({
+          warnings: startupMigrationWarnings,
+          blockers: [],
+        }),
+      );
+    }
     if (shouldRecordStartupCheckpoint) {
-      if (startupMigrationHeartbeatError) {
-        throw startupMigrationHeartbeatError instanceof Error
-          ? startupMigrationHeartbeatError
-          : new Error("OpenClaw startup migration lease heartbeat failed.");
-      }
-      const blockers =
-        startupMigrationWarnings.length > 0
-          ? []
-          : snapshot.valid
-            ? await runStartupUpgradeConvergence({ cfg: baseConfig, env: process.env })
-            : ['OpenClaw config is invalid; run "openclaw doctor --fix" before startup.'];
-      if (startupMigrationWarnings.length > 0 || blockers.length > 0) {
+      const blockers = snapshot.valid
+        ? await runStartupUpgradeConvergence({ cfg: baseConfig, env: process.env })
+        : ['OpenClaw config is invalid; run "openclaw doctor --fix" before startup.'];
+      if (blockers.length > 0) {
         throw new Error(
           formatStartupMigrationFailure({
-            warnings: startupMigrationWarnings,
+            warnings: [],
             blockers,
           }),
         );

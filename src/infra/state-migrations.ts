@@ -53,6 +53,7 @@ import {
   INSTALLED_PLUGIN_INDEX_VERSION,
   type InstalledPluginIndex,
 } from "../plugins/installed-plugin-index.js";
+import type { PluginRuntimeMode } from "../plugins/plugin-runtime-mode.js";
 import {
   buildAgentMainSessionKey,
   DEFAULT_AGENT_ID,
@@ -104,6 +105,7 @@ type SessionStoreAliasPlan = {
 };
 
 export type LegacyStateDetection = {
+  pluginRuntime?: PluginRuntimeMode;
   targetAgentId: string;
   targetMainKey: string;
   targetScope?: SessionScope;
@@ -197,7 +199,7 @@ type MigrationLogger = {
   warn: (message: string) => void;
 };
 
-let autoMigrateChecked = false;
+const autoMigrateCheckedModes = new Set<PluginRuntimeMode>();
 let autoMigrateStateDirChecked = false;
 let autoMigrateTaskStateSidecarsChecked = false;
 let cachedLegacySessionSurfaces: LegacySessionSurface[] | null = null;
@@ -270,7 +272,14 @@ class LegacyTaskStateSidecarConflictError extends Error {
   }
 }
 
-function getLegacySessionSurfaces(): LegacySessionSurface[] {
+function getLegacySessionSurfaces(
+  pluginRuntime: PluginRuntimeMode = "full",
+): LegacySessionSurface[] {
+  if (pluginRuntime === "none") {
+    // Session cleanup also evaluates channel setup modules; plugin-free
+    // preflights leave channel-owned key shapes for explicit doctor.
+    return [];
+  }
   // Legacy migrations run on cold doctor/startup paths. Prefer the narrower
   // setup plugin surface here so session-key cleanup does not materialize full
   // bundled channel runtimes.
@@ -282,7 +291,7 @@ function isSurfaceGroupKey(key: string): boolean {
   return key.includes(":group:") || key.includes(":channel:");
 }
 
-function isLegacyGroupKey(key: string): boolean {
+function isLegacyGroupKey(key: string, pluginRuntime: PluginRuntimeMode): boolean {
   const trimmed = key.trim();
   if (!trimmed) {
     return false;
@@ -291,7 +300,7 @@ function isLegacyGroupKey(key: string): boolean {
   if (lower.startsWith("group:") || lower.startsWith("channel:")) {
     return true;
   }
-  for (const surface of getLegacySessionSurfaces()) {
+  for (const surface of getLegacySessionSurfaces(pluginRuntime)) {
     if (surface.isLegacyGroupSessionKey?.(trimmed)) {
       return true;
     }
@@ -3138,6 +3147,7 @@ function canonicalizeSessionKeyForAgent(params: {
   preserveCanonicalAgentOwner?: boolean;
   preserveAmbiguousKeys?: boolean;
   preserveForeignMainAliases?: boolean;
+  pluginRuntime?: PluginRuntimeMode;
 }): string {
   const raw = params.key.trim();
   if (!raw) {
@@ -3238,10 +3248,15 @@ function canonicalizeSessionKeyForAgent(params: {
     const rest = raw.slice("subagent:".length);
     return normalizeLowercaseStringOrEmpty(`agent:${agentId}:subagent:${rest}`);
   }
+  if (params.pluginRuntime === "none") {
+    // Without channel surfaces, opaque legacy keys cannot be classified safely.
+    // Preserve them for full doctor instead of persisting the generic fallback.
+    return params.key;
+  }
   // Channel-owned legacy shapes must win before the generic group/channel
   // fallback so plugin-specific legacy group keys can canonicalize to their
   // owning channel instead of the generic `...:unknown:group:...` bucket.
-  for (const surface of getLegacySessionSurfaces()) {
+  for (const surface of getLegacySessionSurfaces(params.pluginRuntime)) {
     const canonicalized = surface.canonicalizeLegacySessionKey?.({
       key: raw,
       agentId,
@@ -3262,7 +3277,12 @@ function canonicalizeSessionKeyForAgent(params: {
 
 function pickLatestLegacyDirectEntry(
   store: Record<string, SessionEntryLike>,
+  pluginRuntime: PluginRuntimeMode = "full",
 ): SessionEntryLike | null {
+  // Plugin-free preflight cannot distinguish an opaque direct key from a channel-owned key.
+  if (pluginRuntime === "none") {
+    return null;
+  }
   let best: SessionEntryLike | null = null;
   let bestUpdated = -1;
   for (const [key, entry] of Object.entries(store)) {
@@ -3283,7 +3303,7 @@ function pickLatestLegacyDirectEntry(
     if (normalizedLower.startsWith("subagent:")) {
       continue;
     }
-    if (isLegacyGroupKey(normalized) || isSurfaceGroupKey(normalized)) {
+    if (isLegacyGroupKey(normalized, pluginRuntime) || isSurfaceGroupKey(normalized)) {
       continue;
     }
     const updatedAt = typeof entry.updatedAt === "number" ? entry.updatedAt : 0;
@@ -3349,6 +3369,7 @@ function canonicalizeSessionStore(params: {
   preserveCanonicalAgentOwner?: boolean;
   preserveAmbiguousKeys?: boolean;
   preserveForeignMainAliases?: boolean;
+  pluginRuntime?: PluginRuntimeMode;
 }): { store: Record<string, SessionEntryLike>; legacyKeys: string[] } {
   const canonical = Object.create(null) as Record<string, SessionEntryLike>;
   const meta = new Map<string, { isCanonical: boolean; updatedAt: number }>();
@@ -3367,6 +3388,7 @@ function canonicalizeSessionStore(params: {
       preserveCanonicalAgentOwner: params.preserveCanonicalAgentOwner,
       preserveAmbiguousKeys: params.preserveAmbiguousKeys,
       preserveForeignMainAliases: params.preserveForeignMainAliases,
+      pluginRuntime: params.pluginRuntime,
     });
     const isCanonical = canonicalKey === key;
     if (!isCanonical) {
@@ -3738,6 +3760,7 @@ function listLegacySessionKeys(params: {
   scope?: SessionScope;
   preserveAmbiguousKeys?: boolean;
   preserveForeignMainAliases?: boolean;
+  pluginRuntime?: PluginRuntimeMode;
 }): string[] {
   const legacy: string[] = [];
   for (const key of Object.keys(params.store)) {
@@ -3750,6 +3773,7 @@ function listLegacySessionKeys(params: {
       preserveCanonicalAgentOwner: params.preserveAmbiguousKeys,
       preserveAmbiguousKeys: params.preserveAmbiguousKeys,
       preserveForeignMainAliases: params.preserveForeignMainAliases,
+      pluginRuntime: params.pluginRuntime,
     });
     if (canonical !== key) {
       legacy.push(key);
@@ -3780,7 +3804,7 @@ function removeDirIfEmpty(dir: string) {
 }
 
 export function resetAutoMigrateLegacyStateForTest() {
-  autoMigrateChecked = false;
+  autoMigrateCheckedModes.clear();
   autoMigrateTaskStateSidecarsChecked = false;
   cachedLegacySessionSurfaces = null;
 }
@@ -4088,10 +4112,16 @@ export async function autoMigrateLegacyTaskStateSidecars(params: {
 
 async function collectChannelLegacyStateMigrationPlans(params: {
   cfg: OpenClawConfig;
+  pluginRuntime: PluginRuntimeMode;
   env: NodeJS.ProcessEnv;
   stateDir: string;
   oauthDir: string;
 }): Promise<ChannelLegacyStateMigrationPlan[]> {
+  if (params.pluginRuntime === "none") {
+    // Channel-owned discovery evaluates setup modules, so plugin-free CLI
+    // preflights defer it to explicit doctor or plugin-loading startup.
+    return [];
+  }
   const plans: ChannelLegacyStateMigrationPlan[] = [];
   // Legacy state detection belongs on a narrow setup-entry surface so doctor
   // does not cold-load unrelated runtime channel code.
@@ -4119,11 +4149,17 @@ async function collectChannelLegacyStateMigrationPlans(params: {
 async function collectPluginDoctorStateMigrationPlans(params: {
   cfg: OpenClawConfig;
   pluginDoctorConfig?: OpenClawConfig;
+  pluginRuntime?: PluginRuntimeMode;
   env: NodeJS.ProcessEnv;
   stateDir: string;
   oauthDir: string;
   warnings?: string[];
 }): Promise<DetectedPluginDoctorStateMigrationPlan[]> {
+  if (params.pluginRuntime === "none") {
+    // Core migrations still run for plugin-free CLI commands, but executable plugin
+    // doctor contracts must wait for explicit doctor or plugin-loading startup.
+    return [];
+  }
   const plans: DetectedPluginDoctorStateMigrationPlan[] = [];
   const config = params.pluginDoctorConfig ?? params.cfg;
   for (const entry of listPluginDoctorStateMigrationEntries({
@@ -4174,9 +4210,11 @@ export async function detectLegacyStateMigrations(params: {
   env?: NodeJS.ProcessEnv;
   homedir?: () => string;
   pluginSessionStoreAgentIds?: readonly string[];
+  pluginRuntime?: PluginRuntimeMode;
   sessionStoreOwnership?: SessionStoreOwnership;
 }): Promise<LegacyStateDetection> {
   const env = params.env ?? process.env;
+  const pluginRuntime = params.pluginRuntime ?? "full";
   const homedir = params.homedir ?? os.homedir;
   const stateDir = resolveStateDir(env, homedir);
   const oauthDir = resolveOAuthDir(env, stateDir);
@@ -4194,14 +4232,19 @@ export async function detectLegacyStateMigrations(params: {
   const sessionsLegacyStorePath = path.join(sessionsLegacyDir, "sessions.json");
   const sessionsTargetDir = path.join(stateDir, "agents", targetAgentId, "sessions");
   const sessionsTargetStorePath = path.join(sessionsTargetDir, "sessions.json");
+  // Moving the legacy store consumes provenance needed for channel classification and
+  // direct-chat fallback. Leave the whole session migration for the later full pass.
+  const detectSessionMigrations = pluginRuntime === "full";
   const pluginConfig = params.pluginDoctorConfig ?? params.cfg;
   const pluginSessionStoreAgentIds =
     params.pluginSessionStoreAgentIds ??
-    listPluginDoctorSessionStoreAgentIds({
-      config: pluginConfig,
-      env,
-      pluginIds: collectRelevantDoctorPluginIds(pluginConfig),
-    });
+    (params.pluginRuntime === "none"
+      ? []
+      : listPluginDoctorSessionStoreAgentIds({
+          config: pluginConfig,
+          env,
+          pluginIds: collectRelevantDoctorPluginIds(pluginConfig),
+        }));
   const currentSessionStoreOwnership = resolveSessionStoreOwnership({
     cfg: params.cfg,
     env,
@@ -4222,14 +4265,16 @@ export async function detectLegacyStateMigrations(params: {
     ),
   };
   const { preserveForeignMainAliases } = sessionStoreOwnership;
-  const legacySessionEntries = safeReadDir(sessionsLegacyDir);
+  const legacySessionEntries = detectSessionMigrations ? safeReadDir(sessionsLegacyDir) : [];
   const hasLegacySessions =
-    fileExists(sessionsLegacyStorePath) ||
-    legacySessionEntries.some((e) => e.isFile() && e.name.endsWith(".jsonl"));
+    detectSessionMigrations &&
+    (fileExists(sessionsLegacyStorePath) ||
+      legacySessionEntries.some((e) => e.isFile() && e.name.endsWith(".jsonl")));
 
-  const targetSessionParsed = fileExists(sessionsTargetStorePath)
-    ? readSessionStoreJson5(sessionsTargetStorePath)
-    : { store: {}, ok: true };
+  const targetSessionParsed =
+    detectSessionMigrations && fileExists(sessionsTargetStorePath)
+      ? readSessionStoreJson5(sessionsTargetStorePath)
+      : { store: {}, ok: true };
   const legacyKeys = targetSessionParsed.ok
     ? listLegacySessionKeys({
         store: targetSessionParsed.store,
@@ -4238,9 +4283,11 @@ export async function detectLegacyStateMigrations(params: {
         scope: targetScope,
         preserveAmbiguousKeys: sessionStoreOwnership.preserveAmbiguousKeys,
         preserveForeignMainAliases,
+        pluginRuntime,
       })
     : [];
   const hasStaleSessionFiles =
+    detectSessionMigrations &&
     targetSessionParsed.ok &&
     Object.values(targetSessionParsed.store).some((entry) =>
       Boolean(
@@ -4314,6 +4361,7 @@ export async function detectLegacyStateMigrations(params: {
   const hasCurrentConversationBindings = fileExists(currentConversationBindings.sourcePath);
   const channelPlans = await collectChannelLegacyStateMigrationPlans({
     cfg: params.cfg,
+    pluginRuntime,
     env,
     stateDir,
     oauthDir,
@@ -4325,6 +4373,7 @@ export async function detectLegacyStateMigrations(params: {
       : await collectPluginDoctorStateMigrationPlans({
           cfg: params.cfg,
           pluginDoctorConfig: params.pluginDoctorConfig,
+          pluginRuntime: params.pluginRuntime,
           env,
           stateDir,
           oauthDir,
@@ -4402,6 +4451,7 @@ export async function detectLegacyStateMigrations(params: {
   }
 
   return {
+    pluginRuntime,
     targetAgentId,
     targetMainKey,
     targetScope,
@@ -4551,6 +4601,7 @@ async function migrateLegacySessions(
     preserveCanonicalAgentOwner: true,
     preserveAmbiguousKeys: detected.sessions.preserveAmbiguousKeys,
     preserveForeignMainAliases: detected.sessions.preserveForeignMainAliases,
+    pluginRuntime: detected.pluginRuntime,
   });
   const canonicalizedLegacy = canonicalizeSessionStore({
     store: legacyStore,
@@ -4559,6 +4610,7 @@ async function migrateLegacySessions(
     scope: detected.targetScope,
     preserveCanonicalAgentOwner: true,
     preserveForeignMainAliases: detected.sessions.preserveForeignMainAliases,
+    pluginRuntime: detected.pluginRuntime,
   });
   const preservedLegacyForeignMainAliasCount = detected.sessions.preserveForeignMainAliases
     ? Object.keys(legacyStore).filter((key) =>
@@ -4597,7 +4649,7 @@ async function migrateLegacySessions(
   });
   let migratedDirectChatKey: string | undefined;
   if (!merged[mainKey]) {
-    const latest = pickLatestLegacyDirectEntry(legacyStore);
+    const latest = pickLatestLegacyDirectEntry(legacyStore, detected.pluginRuntime);
     if (latest?.sessionId) {
       merged[mainKey] = latest;
       migratedDirectChatKey = mainKey;
@@ -4803,6 +4855,7 @@ async function runPluginDoctorStateMigrationPlans(params: {
   const notices: string[] = [];
   const refreshedPlans = await collectPluginDoctorStateMigrationPlans({
     cfg: params.config,
+    pluginRuntime: params.detected.pluginRuntime,
     env: params.env,
     stateDir: params.detected.stateDir,
     oauthDir: params.detected.oauthDir,
@@ -4839,6 +4892,7 @@ export async function autoMigrateLegacyPluginDoctorState(params: {
   env?: NodeJS.ProcessEnv;
   homedir?: () => string;
   log?: MigrationLogger;
+  pluginRuntime?: PluginRuntimeMode;
 }): Promise<{
   migrated: boolean;
   skipped: boolean;
@@ -4871,6 +4925,7 @@ export async function autoMigrateLegacyPluginDoctorState(params: {
   }
   const plans = await collectPluginDoctorStateMigrationPlans({
     cfg: params.config,
+    pluginRuntime: params.pluginRuntime,
     env,
     stateDir,
     oauthDir,
@@ -5235,6 +5290,7 @@ export async function migrateOrphanedSessionKeys(params: {
   cfg: OpenClawConfig;
   env?: NodeJS.ProcessEnv;
   additionalAgentIds?: readonly string[];
+  pluginRuntime?: PluginRuntimeMode;
 }): Promise<{ changes: string[]; warnings: string[] }> {
   const changes: string[] = [];
   const warnings: string[] = [];
@@ -5245,11 +5301,13 @@ export async function migrateOrphanedSessionKeys(params: {
   const storeConfig = params.cfg.session?.store;
   const pluginAgentIds =
     params.additionalAgentIds ??
-    listPluginDoctorSessionStoreAgentIds({
-      config: params.cfg,
-      env,
-      pluginIds: collectRelevantDoctorPluginIds(params.cfg),
-    });
+    (params.pluginRuntime === "none"
+      ? []
+      : listPluginDoctorSessionStoreAgentIds({
+          config: params.cfg,
+          env,
+          pluginIds: collectRelevantDoctorPluginIds(params.cfg),
+        }));
   const pluginAgentIdSet = new Set(pluginAgentIds.map((id) => normalizeAgentId(id)));
 
   // Collect all known agent store paths with their owning agentIds.
@@ -5394,6 +5452,7 @@ export async function migrateOrphanedSessionKeys(params: {
         preserveCanonicalAgentOwner: true,
         preserveAmbiguousKeys,
         preserveForeignMainAliases: pluginForeignMainAliasRisk,
+        pluginRuntime: params.pluginRuntime,
       });
       working = canonicalized;
       // Each pass only counts keys it changed from the current working store, so
@@ -5431,7 +5490,12 @@ async function migrateLegacyAcpSessionMetadata(params: {
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   pluginSessionStoreAgentIds?: readonly string[];
+  pluginRuntime?: PluginRuntimeMode;
 }): Promise<{ changes: string[]; warnings: string[] }> {
+  // ACP metadata keys must follow the same channel-aware canonicalization as their sessions.
+  if (params.pluginRuntime === "none") {
+    return { changes: [], warnings: [] };
+  }
   const changes: string[] = [];
   const warnings: string[] = [];
   const env = params.env ?? process.env;
@@ -5593,6 +5657,7 @@ async function migrateLegacyAcpSessionMetadata(params: {
           mainKey,
           scope,
           skipCrossAgentRemap: true,
+          pluginRuntime: params.pluginRuntime,
         });
         writeAcpSessionMetaForMigration({
           sessionKey: canonicalSessionKey,
@@ -5836,6 +5901,7 @@ export async function autoMigrateLegacyState(params: {
   log?: MigrationLogger;
   now?: () => number;
   recoverCorruptTargetStore?: boolean;
+  pluginRuntime?: PluginRuntimeMode;
 }): Promise<{
   migrated: boolean;
   skipped: boolean;
@@ -5843,10 +5909,13 @@ export async function autoMigrateLegacyState(params: {
   warnings: string[];
   notices?: string[];
 }> {
-  if (autoMigrateChecked) {
+  const pluginRuntime = params.pluginRuntime ?? "full";
+  if (autoMigrateCheckedModes.has(pluginRuntime)) {
     return { migrated: false, skipped: true, changes: [], warnings: [] };
   }
-  autoMigrateChecked = true;
+  // Gateway startup follows the plugin-free core pass with a full plugin-aware pass.
+  // Track them separately or the first pass suppresses required plugin migrations.
+  autoMigrateCheckedModes.add(pluginRuntime);
 
   const env = params.env ?? process.env;
   const stateDirResult = await autoMigrateLegacyStateDir({
@@ -5859,11 +5928,14 @@ export async function autoMigrateLegacyState(params: {
     env: { ...env, OPENCLAW_STATE_DIR: stateDir },
   });
   const pluginDoctorConfig = params.pluginDoctorConfig ?? params.cfg;
-  const pluginSessionStoreAgentIds = listPluginDoctorSessionStoreAgentIds({
-    config: pluginDoctorConfig,
-    env,
-    pluginIds: collectRelevantDoctorPluginIds(pluginDoctorConfig),
-  });
+  const pluginSessionStoreAgentIds =
+    params.pluginRuntime === "none"
+      ? []
+      : listPluginDoctorSessionStoreAgentIds({
+          config: pluginDoctorConfig,
+          env,
+          pluginIds: collectRelevantDoctorPluginIds(pluginDoctorConfig),
+        });
   // Capture ownership before orphan-key rewrites. Atomic replacement can split
   // a configured filesystem alias from the standard target pathname.
   const sessionStoreOwnership = resolveSessionStoreOwnership({
@@ -5880,12 +5952,14 @@ export async function autoMigrateLegacyState(params: {
     cfg: params.cfg,
     env,
     additionalAgentIds: pluginSessionStoreAgentIds,
+    pluginRuntime: params.pluginRuntime,
   });
   const acpSessionMetadata = await migrateLegacyAcpSessionMetadata({
     cfg: params.cfg,
     env,
     now: params.now,
     pluginSessionStoreAgentIds,
+    pluginRuntime: params.pluginRuntime,
   });
 
   const logMigrationResults = (changes: string[], warnings: string[], notices: string[]) => {
@@ -5911,6 +5985,7 @@ export async function autoMigrateLegacyState(params: {
     cfg: params.cfg,
     pluginDoctorConfig: params.pluginDoctorConfig,
     pluginSessionStoreAgentIds,
+    pluginRuntime: params.pluginRuntime,
     sessionStoreOwnership,
     env,
     homedir: params.homedir,
@@ -6128,6 +6203,7 @@ export async function autoMigrateLegacyState(params: {
     env,
     now,
     pluginSessionStoreAgentIds,
+    pluginRuntime: params.pluginRuntime,
   });
   const agentDir = await migrateLegacyAgentDir(detected, now);
   const channelPlans = await runLegacyMigrationPlans(

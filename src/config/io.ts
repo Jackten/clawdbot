@@ -33,6 +33,7 @@ import {
   resolvePluginMetadataSnapshot,
   type PluginMetadataSnapshot,
 } from "../plugins/plugin-metadata-snapshot.js";
+import type { PluginRuntimeMode } from "../plugins/plugin-runtime-mode.js";
 import { isRecord } from "../utils.js";
 import { VERSION } from "../version.js";
 import { DuplicateAgentDirError, findDuplicateAgentDirs } from "./agent-dirs.js";
@@ -943,6 +944,7 @@ export type ConfigSnapshotReadOptions = {
     current: OpenClawConfig,
   ) => boolean | Promise<boolean>;
   skipPluginValidation?: boolean;
+  pluginRuntime?: PluginRuntimeMode;
   preservedLegacyRootKeys?: readonly string[];
   suppressFutureVersionWarning?: boolean;
 };
@@ -1446,18 +1448,20 @@ async function finalizeReadConfigSnapshotInternalResult(
 async function collectInvalidConfigLegacyIssues(
   raw: unknown,
   sourceRaw: unknown,
+  pluginRuntime: PluginRuntimeMode,
 ): Promise<LegacyConfigIssue[]> {
   if (!raw || typeof raw !== "object") {
     return [];
   }
   const { findDoctorLegacyConfigIssues } =
     await import("../commands/doctor/shared/legacy-config-issues.js");
-  return findDoctorLegacyConfigIssues(raw, sourceRaw);
+  return findDoctorLegacyConfigIssues(raw, sourceRaw, undefined, pluginRuntime);
 }
 
 export function createConfigIO(
   overrides: ConfigIoDeps & {
     pluginValidation?: "full" | "skip";
+    pluginRuntime?: PluginRuntimeMode;
     preservedLegacyRootKeys?: readonly string[];
     shellEnvFallback?: "load" | "defer";
   } = {},
@@ -2067,7 +2071,11 @@ export function createConfigIO(
       );
       if (!validated.ok) {
         const legacyIssues = await deps.measure("config.snapshot.read.legacy-issues", () =>
-          collectInvalidConfigLegacyIssues(effectiveConfigRaw, effectiveParsed),
+          collectInvalidConfigLegacyIssues(
+            effectiveConfigRaw,
+            effectiveParsed,
+            overrides.pluginRuntime ?? "full",
+          ),
         );
         return await finalizeReadConfigSnapshotInternalResult(deps, {
           snapshot: createConfigFileSnapshot({
@@ -2844,6 +2852,7 @@ export async function readConfigFileSnapshot(
     ...(options.isolateEnv ? { env: cloneEnvWithPlatformSemantics(process.env) } : {}),
     ...(options.lowerPrecedenceEnv ? { lowerPrecedenceEnv: options.lowerPrecedenceEnv } : {}),
     ...(options.skipPluginValidation ? { pluginValidation: "skip" } : {}),
+    ...(options.pluginRuntime ? { pluginRuntime: options.pluginRuntime } : {}),
     ...(options.suppressFutureVersionWarning ? { suppressFutureVersionWarning: true } : {}),
     ...(options.preservedLegacyRootKeys
       ? { preservedLegacyRootKeys: options.preservedLegacyRootKeys }

@@ -7,6 +7,7 @@ import { readConfigFileSnapshot, setRuntimeConfigSnapshot } from "../../config/c
 import { resolveLegacyStateDirs, resolveOAuthDir, resolveStateDir } from "../../config/paths.js";
 import type { ConfigFileSnapshot } from "../../config/types.js";
 import { resolveRequiredHomeDir } from "../../infra/home-dir.js";
+import type { PluginRuntimeMode } from "../../plugins/plugin-runtime-mode.js";
 import { ExitError, type RuntimeEnv } from "../../runtime.js";
 import { shouldMigrateStateFromPath } from "../argv.js";
 
@@ -26,12 +27,14 @@ const ALLOWED_INVALID_GATEWAY_SUBCOMMANDS = new Set([
 ]);
 const ALLOWED_INVALID_TASK_SUBCOMMANDS = new Set(["list", "audit"]);
 let didRunDoctorConfigFlow = false;
-let configSnapshotPromise: Promise<Awaited<ReturnType<typeof readConfigFileSnapshot>>> | null =
-  null;
+const configSnapshotPromises = new Map<
+  PluginRuntimeMode,
+  Promise<Awaited<ReturnType<typeof readConfigFileSnapshot>>>
+>();
 
 function resetConfigGuardStateForTests() {
   didRunDoctorConfigFlow = false;
-  configSnapshotPromise = null;
+  configSnapshotPromises.clear();
 }
 
 function fileOrDirExists(pathname: string): boolean {
@@ -183,21 +186,25 @@ function shouldRequireStartupMigrationCheckpoint(commandPath: string[]): boolean
   );
 }
 
-async function getConfigSnapshot() {
+async function getConfigSnapshot(pluginRuntime: PluginRuntimeMode = "full") {
+  // Invalid snapshots collect legacy issues; carry the mode so lightweight
+  // plugin-free commands cannot re-enter executable plugin doctor contracts.
   // Tests often mutate config fixtures; caching can make those flaky.
   if (process.env.VITEST === "true") {
-    return readConfigFileSnapshot();
+    return readConfigFileSnapshot({ pluginRuntime });
   }
-  if (!configSnapshotPromise) {
-    const pendingSnapshot = readConfigFileSnapshot();
-    configSnapshotPromise = pendingSnapshot;
-    pendingSnapshot.catch(() => {
-      if (configSnapshotPromise === pendingSnapshot) {
-        configSnapshotPromise = null;
-      }
-    });
+  const cachedSnapshot = configSnapshotPromises.get(pluginRuntime);
+  if (cachedSnapshot) {
+    return cachedSnapshot;
   }
-  return configSnapshotPromise;
+  const pendingSnapshot = readConfigFileSnapshot({ pluginRuntime });
+  configSnapshotPromises.set(pluginRuntime, pendingSnapshot);
+  pendingSnapshot.catch(() => {
+    if (configSnapshotPromises.get(pluginRuntime) === pendingSnapshot) {
+      configSnapshotPromises.delete(pluginRuntime);
+    }
+  });
+  return pendingSnapshot;
 }
 
 export async function ensureConfigReady(params: {
@@ -206,6 +213,7 @@ export async function ensureConfigReady(params: {
   suppressDoctorStdout?: boolean;
   allowInvalid?: boolean;
   beforeStateMigrations?: (snapshot?: ConfigFileSnapshot) => Promise<boolean>;
+  pluginRuntime?: PluginRuntimeMode;
 }): Promise<void> {
   const commandPath = params.commandPath ?? [];
   let preflightSnapshot: Awaited<ReturnType<typeof readConfigFileSnapshot>> | null = null;
@@ -218,6 +226,7 @@ export async function ensureConfigReady(params: {
         migrateState: true,
         migrateLegacyConfig: false,
         invalidConfigNote: false,
+        ...(params.pluginRuntime ? { pluginRuntime: params.pluginRuntime } : {}),
         ...(shouldRequireStartupMigrationCheckpoint(commandPath)
           ? { requireStartupMigrationCheckpoint: true }
           : {}),
@@ -245,7 +254,7 @@ export async function ensureConfigReady(params: {
     preflightSnapshot = await runStateMigrationPreflight();
   }
 
-  let snapshot = preflightSnapshot ?? (await getConfigSnapshot());
+  let snapshot = preflightSnapshot ?? (await getConfigSnapshot(params.pluginRuntime));
   if (
     !preflightSnapshot &&
     !didRunDoctorConfigFlow &&

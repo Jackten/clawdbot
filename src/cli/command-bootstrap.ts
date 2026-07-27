@@ -1,5 +1,6 @@
 // Shared command preflight: config readiness plus optional plugin registry activation.
 import type { ConfigFileSnapshot } from "../config/types.js";
+import type { PluginRuntimeMode } from "../plugins/plugin-runtime-mode.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import type { CliPluginRegistryPolicy } from "./command-catalog.js";
@@ -23,11 +24,15 @@ export async function ensureCliCommandBootstrap(params: {
   loadPlugins?: boolean;
   pluginRegistry?: CliPluginRegistryPolicy;
 }) {
+  const pluginRuntime: PluginRuntimeMode = params.loadPlugins === false ? "none" : "full";
   if (!params.skipConfigGuard) {
     const { ensureConfigReady } = await loadConfigGuardModule();
+    // Plugin-free commands must keep doctor from re-entering executable plugin surfaces
+    // before the explicit registry-loading gate below.
     await ensureConfigReady({
       runtime: params.runtime,
       commandPath: params.commandPath,
+      pluginRuntime,
       ...(params.allowInvalid ? { allowInvalid: true } : {}),
       ...(params.beforeStateMigrations
         ? { beforeStateMigrations: params.beforeStateMigrations }

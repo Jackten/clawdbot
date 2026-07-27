@@ -35,6 +35,7 @@ describe("ensureCliCommandBootstrap", () => {
     expect(ensureConfigReadyMock).toHaveBeenCalledWith({
       runtime,
       commandPath: ["agents", "list"],
+      pluginRuntime: "full",
       allowInvalid: true,
       suppressDoctorStdout: true,
     });
