@@ -161,6 +161,10 @@ export type TalkConfigParams = SchemaType<"TalkConfigParams">;
 export type TalkConfigResult = SchemaType<"TalkConfigResult">;
 export type TalkClientCreateParams = SchemaType<"TalkClientCreateParams">;
 export type TalkClientCreateResult = SchemaType<"TalkClientCreateResult">;
+export type TalkClientRegisterExternalSessionParams =
+  SchemaType<"TalkClientRegisterExternalSessionParams">;
+export type TalkClientRegisterExternalSessionResult =
+  SchemaType<"TalkClientRegisterExternalSessionResult">;
 export type TalkClientSteerParams = SchemaType<"TalkClientSteerParams">;
 export type TalkAgentControlResult = SchemaType<"TalkAgentControlResult">;
 export type TalkClientToolCallParams = SchemaType<"TalkClientToolCallParams">;

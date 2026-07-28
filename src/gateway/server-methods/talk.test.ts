@@ -2347,6 +2347,89 @@ describe("talk.client.toolCall handler", () => {
     resetTaskRegistryForTests({ persist: false });
   });
 
+  it("lets an externally minted session register ownership before executing a gateway tool", async () => {
+    const client = {
+      connId: "conn-external",
+      connect: { device: { id: "paired-phone" } },
+    } as never;
+    const registerRespond = vi.fn();
+
+    await talkHandlers["talk.client.registerExternalSession"]({
+      req: {
+        type: "req",
+        id: "register-1",
+        method: "talk.client.registerExternalSession",
+      },
+      params: { sessionKey: "external-main" },
+      client,
+      isWebchatConnect: () => false,
+      respond: registerRespond as never,
+      context: {} as never,
+    });
+
+    expectRespondOk(registerRespond, { ok: true });
+    const toolRespond = vi.fn();
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "tool-1", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "external-main",
+        callId: "home-1",
+        name: "control_home",
+        args: { command: "turn on the kitchen lights" },
+      },
+      client,
+      isWebchatConnect: () => false,
+      respond: toolRespond as never,
+      context: {
+        getRuntimeConfig: () =>
+          ({
+            talk: {
+              realtime: {
+                gatewayTools: [
+                  {
+                    name: "control_home",
+                    description: "Control Home Assistant.",
+                    exec: "/usr/local/bin/control-home",
+                  },
+                ],
+              },
+            },
+          }) as OpenClawConfig,
+      } as never,
+    });
+
+    expect(mocks.runTalkRealtimeGatewayTool).toHaveBeenCalledWith(
+      "/usr/local/bin/control-home",
+      ["turn on the kitchen lights"],
+      expect.any(Object),
+    );
+    expectRespondOk(toolRespond, {
+      result: { response: "Lights are on." },
+    });
+  });
+
+  it("rejects external-session registration without a paired device identity", async () => {
+    const respond = vi.fn();
+
+    await talkHandlers["talk.client.registerExternalSession"]({
+      req: {
+        type: "req",
+        id: "register-unpaired",
+        method: "talk.client.registerExternalSession",
+      },
+      params: { sessionKey: "external-main" },
+      client: { connId: "conn-unpaired" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {} as never,
+    });
+
+    expectRespondError(respond, {
+      code: ErrorCodes.NOT_PAIRED,
+      message: "talk.client.registerExternalSession requires an authenticated paired device",
+    });
+  });
+
   it("starts agent consult through gateway policy instead of exposing chat.send to browser clients", async () => {
     const respond = vi.fn();
 

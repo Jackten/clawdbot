@@ -482,6 +482,7 @@ export const coreGatewayHandlers: GatewayRequestHandlers = {
       "talk.session.steer",
       "talk.session.close",
       "talk.client.create",
+      "talk.client.registerExternalSession",
       "talk.client.toolCall",
       "talk.client.steer",
       "talk.catalog",

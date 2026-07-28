@@ -214,6 +214,22 @@ export const TalkClientCreateParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** Registers an externally minted client session to the authenticated gateway device. */
+export const TalkClientRegisterExternalSessionParamsSchema = Type.Object(
+  {
+    sessionKey: NonEmptyString,
+  },
+  { additionalProperties: false },
+);
+
+/** Acknowledges that external Talk session ownership was registered. */
+export const TalkClientRegisterExternalSessionResultSchema = Type.Object(
+  {
+    ok: Type.Literal(true),
+  },
+  { additionalProperties: false },
+);
+
 /** Tool-call request from a browser/client session back into the agent runtime. */
 export const TalkClientToolCallParamsSchema = Type.Object(
   {

@@ -98,6 +98,10 @@ import {
   TalkClientCreateParamsSchema,
   type TalkClientCreateResult,
   TalkClientCreateResultSchema,
+  type TalkClientRegisterExternalSessionParams,
+  TalkClientRegisterExternalSessionParamsSchema,
+  type TalkClientRegisterExternalSessionResult,
+  TalkClientRegisterExternalSessionResultSchema,
   type TalkAgentControlResult,
   TalkAgentControlResultSchema,
   type TalkClientSteerParams,
@@ -873,6 +877,14 @@ export const validateTalkClientCreateParams = lazyCompile<TalkClientCreateParams
 export const validateTalkClientCreateResult = lazyCompile<TalkClientCreateResult>(
   TalkClientCreateResultSchema,
 );
+export const validateTalkClientRegisterExternalSessionParams =
+  lazyCompile<TalkClientRegisterExternalSessionParams>(
+    TalkClientRegisterExternalSessionParamsSchema,
+  );
+export const validateTalkClientRegisterExternalSessionResult =
+  lazyCompile<TalkClientRegisterExternalSessionResult>(
+    TalkClientRegisterExternalSessionResultSchema,
+  );
 export const validateTalkClientToolCallParams = lazyCompile<TalkClientToolCallParams>(
   TalkClientToolCallParamsSchema,
 );
@@ -1282,6 +1294,8 @@ export {
   TalkCatalogResultSchema,
   TalkClientCreateParamsSchema,
   TalkClientCreateResultSchema,
+  TalkClientRegisterExternalSessionParamsSchema,
+  TalkClientRegisterExternalSessionResultSchema,
   TalkAgentControlResultSchema,
   TalkClientSteerParamsSchema,
   TalkClientToolCallParamsSchema,
@@ -1485,6 +1499,8 @@ export type {
   TalkCatalogResult,
   TalkClientCreateParams,
   TalkClientCreateResult,
+  TalkClientRegisterExternalSessionParams,
+  TalkClientRegisterExternalSessionResult,
   TalkClientSteerParams,
   TalkAgentControlResult,
   TalkClientToolCallParams,
