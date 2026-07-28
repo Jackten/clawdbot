@@ -1,10 +1,23 @@
 /**
  * Tests for talk gateway methods that coordinate speech and audio providers.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCodes } from "../../../packages/gateway-protocol/src/index.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { normalizeResolvedSecretInputString } from "../../config/types.secrets.js";
+import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../talk/agent-consult-tool.js";
+import {
+  cancelTaskById,
+  getTaskById,
+  resetTaskRegistryForTests,
+} from "../../tasks/runtime-internal.js";
+import { installInMemoryTaskRegistryRuntime } from "../../test-utils/task-registry-runtime.js";
+import {
+  claimOwnedTalkClientSession,
+  rememberTalkClientSession,
+  resetTalkClientSessionRegistryForTest,
+  resolveTalkClientSessionOwnerId,
+} from "../talk-client-session-registry.js";
 import { buildTalkRealtimeConfig } from "./talk-shared.js";
 import { talkHandlers } from "./talk.js";
 
@@ -29,15 +42,19 @@ const mocks = vi.hoisted(() => ({
   resolveConfiguredRealtimeVoiceProvider: vi.fn(),
   createTalkRealtimeRelaySession: vi.fn(),
   sendTalkRealtimeRelayAudio: vi.fn(),
+  attachTalkRealtimeRelayImage: vi.fn(() => ({ accepted: true })),
   cancelTalkRealtimeRelayTurn: vi.fn(),
   stopTalkRealtimeRelaySession: vi.fn(),
   registerTalkRealtimeRelayAgentRun: vi.fn(),
+  runTalkRealtimeGatewayTool: vi.fn(),
   submitTalkRealtimeRelayToolResult: vi.fn(),
   createTalkTranscriptionRelaySession: vi.fn(),
   sendTalkTranscriptionRelayAudio: vi.fn(),
   cancelTalkTranscriptionRelayTurn: vi.fn(),
   stopTalkTranscriptionRelaySession: vi.fn(),
+  chatAbort: vi.fn(),
   chatSend: vi.fn(),
+  forkSessionEntryFromParent: vi.fn(),
   controlRealtimeVoiceAgentRun: vi.fn(),
   steerTalkRealtimeRelayAgentRun: vi.fn(),
   resolveSessionKeyFromResolveParams: vi.fn(),
@@ -78,8 +95,13 @@ vi.mock("../../talk/agent-run-control.js", () => ({
   controlRealtimeVoiceAgentRun: mocks.controlRealtimeVoiceAgentRun,
 }));
 
+vi.mock("../../auto-reply/reply/session-fork.js", () => ({
+  forkSessionEntryFromParent: mocks.forkSessionEntryFromParent,
+}));
+
 vi.mock("./chat.js", () => ({
   chatHandlers: {
+    "chat.abort": mocks.chatAbort,
     "chat.send": mocks.chatSend,
   },
 }));
@@ -93,8 +115,10 @@ vi.mock("../talk-realtime-relay.js", async (importOriginal) => {
   return {
     ...actual,
     cancelTalkRealtimeRelayTurn: mocks.cancelTalkRealtimeRelayTurn,
+    attachTalkRealtimeRelayImage: mocks.attachTalkRealtimeRelayImage,
     createTalkRealtimeRelaySession: mocks.createTalkRealtimeRelaySession,
     registerTalkRealtimeRelayAgentRun: mocks.registerTalkRealtimeRelayAgentRun,
+    runTalkRealtimeGatewayTool: mocks.runTalkRealtimeGatewayTool,
     sendTalkRealtimeRelayAudio: mocks.sendTalkRealtimeRelayAudio,
     steerTalkRealtimeRelayAgentRun: mocks.steerTalkRealtimeRelayAgentRun,
     stopTalkRealtimeRelaySession: mocks.stopTalkRealtimeRelaySession,
@@ -175,6 +199,10 @@ beforeEach(() => {
         provider.aliases?.some((alias) => alias.toLowerCase() === normalized),
     );
   });
+});
+
+afterEach(() => {
+  resetTalkClientSessionRegistryForTest();
 });
 
 describe("talk.catalog handler", () => {
@@ -1455,6 +1483,7 @@ describe("talk.session unified handlers", () => {
                 providers: { openai: { apiKey: "openai-key" } },
                 instructions: "Speak warmly.",
                 consultRouting: "force-agent-consult",
+                allowImageInput: true,
                 gatewayTools: [
                   {
                     name: "control_home",
@@ -1573,6 +1602,29 @@ describe("talk.session unified handlers", () => {
       audioBase64: "aGVsbG8=",
       timestamp: 42,
     });
+
+    const imageRespond = vi.fn();
+    await talkHandlers["talk.session.attachImage"]({
+      req: { type: "req", id: "image-1", method: "talk.session.attachImage" },
+      params: {
+        sessionId: "relay-unified-1",
+        imageBase64: "aGVsbG8=",
+        mimeType: "image/jpeg",
+        note: "[live video frame]",
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: imageRespond as never,
+      context: {} as never,
+    });
+    expect(mocks.attachTalkRealtimeRelayImage).toHaveBeenCalledWith({
+      relaySessionId: "relay-unified-1",
+      connId: "conn-1",
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/jpeg",
+      note: "[live video frame]",
+    });
+    expectRespondOk(imageRespond, { ok: true, accepted: true });
 
     const cancelRespond = vi.fn();
     await talkHandlers["talk.session.cancelOutput"]({
@@ -2275,6 +2327,11 @@ describe("talk.session unified handlers", () => {
 describe("talk.client.toolCall handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    rememberTalkClientSession({ connId: "conn-1", sessionKey: "main" });
+    mocks.runTalkRealtimeGatewayTool.mockResolvedValue({ stdout: "Lights are on.\n" });
+    resetTaskRegistryForTests({ persist: false });
+    installInMemoryTaskRegistryRuntime();
+    mocks.forkSessionEntryFromParent.mockResolvedValue({ status: "missing-parent" });
     mocks.chatSend.mockImplementation(
       async ({
         respond,
@@ -2284,6 +2341,10 @@ describe("talk.client.toolCall handler", () => {
         respond(true, { runId: "run-voice-1" }, undefined);
       },
     );
+  });
+
+  afterEach(() => {
+    resetTaskRegistryForTests({ persist: false });
   });
 
   it("starts agent consult through gateway policy instead of exposing chat.send to browser clients", async () => {
@@ -2310,11 +2371,64 @@ describe("talk.client.toolCall handler", () => {
       params?: Record<string, unknown>;
     };
     expectRecordFields(chatInput.req, { method: "chat.send" });
-    expectRecordFields(chatInput.params, { sessionKey: "main" });
+    expect(chatInput.params?.sessionKey).toMatch(/^agent:main:talk-job:/);
+    expect(mocks.forkSessionEntryFromParent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "main",
+        parentSessionKey: "agent:main:main",
+        sessionKey: chatInput.params?.sessionKey,
+      }),
+    );
     expect(chatInput.params?.message).toContain("What is in this repo?");
     expect(chatInput.params?.idempotencyKey).toMatch(/^talk-call-1-/);
     const response = expectRespondOk(respond, { runId: "run-voice-1" }) as Record<string, unknown>;
     expect(response.idempotencyKey).toMatch(/^talk-call-1-/);
+    expect(response.sessionKey).toBe(chatInput.params?.sessionKey);
+    expect(response.receipt).toEqual({
+      text: "That work is still running. I’ll deliver the result when it finishes.",
+      status: "accepted",
+      jobId: expect.any(String),
+      runId: "run-voice-1",
+      title: "What is in this repo?",
+      state: "running",
+    });
+    const receipt = response.receipt as { jobId: string };
+    expect(getTaskById(receipt.jobId)).toMatchObject({
+      status: "running",
+      taskKind: "agent_consult",
+      ownerKey: "main",
+      childSessionKey: chatInput.params?.sessionKey,
+      label: "What is in this repo?",
+      progressSummary: "Queued for background admission.",
+    });
+  });
+
+  it("terminalizes an accepted consult when its gateway run controller is missing", async () => {
+    const respond = vi.fn();
+
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "1", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        callId: "call-missing-controller",
+        name: "openclaw_agent_consult",
+        args: { question: "Do not leave a ghost task" },
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {
+        getRuntimeConfig: () => ({}) as OpenClawConfig,
+        chatAbortControllers: new Map(),
+        dedupe: new Map(),
+      } as never,
+    });
+
+    const response = expectRespondOk(respond) as { receipt: { jobId: string } };
+    expect(getTaskById(response.receipt.jobId)).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("lost its in-process run controller"),
+    });
   });
 
   it("returns the tool-call acknowledgement while the agent run continues", async () => {
@@ -2345,8 +2459,156 @@ describe("talk.client.toolCall handler", () => {
       } as never,
     });
 
-    expectRespondOk(respond, { runId: "run-active" });
+    expectRespondOk(respond, {
+      runId: "run-active",
+      receipt: {
+        text: "That work is still running. I’ll deliver the result when it finishes.",
+        status: "accepted",
+        jobId: expect.any(String),
+        runId: "run-active",
+        title: "What is running?",
+        state: "running",
+      },
+    });
     finishRun?.();
+  });
+
+  it("cancels the accepted chat run by durable receipt job id", async () => {
+    const chatAbortControllers = new Map<string, { onRemoved?: () => void }>();
+    mocks.chatSend.mockImplementationOnce(
+      ({
+        context,
+        params,
+        respond,
+      }: {
+        context: { chatAbortControllers: typeof chatAbortControllers };
+        params: { idempotencyKey: string };
+        respond: (ok: boolean, result?: unknown, error?: unknown) => void;
+      }) => {
+        context.chatAbortControllers.set(params.idempotencyKey, {});
+        respond(true, { runId: params.idempotencyKey }, undefined);
+      },
+    );
+    mocks.chatAbort.mockImplementationOnce(
+      ({
+        context,
+        params,
+        respond,
+      }: {
+        context: { chatAbortControllers: typeof chatAbortControllers };
+        params: { runId: string };
+        respond: (ok: boolean, result?: unknown, error?: unknown) => void;
+      }) => {
+        const active = context.chatAbortControllers.get(params.runId);
+        context.chatAbortControllers.delete(params.runId);
+        active?.onRemoved?.();
+        respond(true, { ok: true, aborted: true, runIds: [params.runId] }, undefined);
+      },
+    );
+    const respond = vi.fn();
+    const context = {
+      getRuntimeConfig: () => ({}) as OpenClawConfig,
+      chatAbortControllers,
+      dedupe: new Map(),
+    } as never;
+
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "1", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        callId: "call-cancel",
+        name: "openclaw_agent_consult",
+        args: { question: "Keep working until I cancel" },
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context,
+    });
+
+    const response = expectRespondOk(respond) as {
+      receipt: { jobId: string; runId: string };
+    };
+    const workerSessionKey = (mockCallArg(mocks.chatSend) as { params: { sessionKey: string } })
+      .params.sessionKey;
+    expect(workerSessionKey).toMatch(/^agent:main:talk-job:/);
+    const cancelled = await cancelTaskById({
+      cfg: {} as OpenClawConfig,
+      taskId: response.receipt.jobId,
+      reason: "Stopped by user.",
+    });
+
+    expect(mocks.chatAbort).toHaveBeenCalledOnce();
+    expectRecordFields(mockCallArg(mocks.chatAbort).params, {
+      sessionKey: workerSessionKey,
+      runId: response.receipt.runId,
+    });
+    expect(cancelled).toMatchObject({
+      found: true,
+      cancelled: true,
+      task: {
+        taskId: response.receipt.jobId,
+        status: "cancelled",
+      },
+    });
+  });
+
+  it("terminalizes the receipt from gateway evidence when chat emits no lifecycle event", async () => {
+    const chatAbortControllers = new Map<string, { onRemoved?: () => void }>();
+    const dedupe = new Map<string, unknown>();
+    mocks.chatSend.mockImplementationOnce(
+      ({
+        context,
+        params,
+        respond,
+      }: {
+        context: { chatAbortControllers: typeof chatAbortControllers };
+        params: { idempotencyKey: string };
+        respond: (ok: boolean, result?: unknown, error?: unknown) => void;
+      }) => {
+        context.chatAbortControllers.set(params.idempotencyKey, {});
+        respond(true, { runId: params.idempotencyKey }, undefined);
+      },
+    );
+    const respond = vi.fn();
+    const context = {
+      getRuntimeConfig: () => ({}) as OpenClawConfig,
+      chatAbortControllers,
+      dedupe,
+    } as never;
+
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "1", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        callId: "call-terminal",
+        name: "openclaw_agent_consult",
+        args: { question: "Finish without a lifecycle event" },
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context,
+    });
+
+    const response = expectRespondOk(respond) as {
+      receipt: { jobId: string; runId: string };
+    };
+    dedupe.set(`chat:${response.receipt.runId}`, {
+      ts: Date.now(),
+      ok: true,
+      payload: {
+        runId: response.receipt.runId,
+        status: "ok",
+        endedAt: Date.now(),
+      },
+    });
+    chatAbortControllers.get(response.receipt.runId)?.onRemoved?.();
+
+    expect(getTaskById(response.receipt.jobId)).toMatchObject({
+      status: "succeeded",
+      deliveryStatus: "not_applicable",
+    });
   });
 
   it("passes configured consult thinking and fast-mode overrides to chat.send", async () => {
@@ -2402,10 +2664,13 @@ describe("talk.client.toolCall handler", () => {
       } as never,
     });
 
+    const workerSessionKey = (mockCallArg(mocks.chatSend) as { params: { sessionKey: string } })
+      .params.sessionKey;
+    expect(workerSessionKey).toMatch(/^agent:main:talk-job:/);
     expect(mocks.registerTalkRealtimeRelayAgentRun).toHaveBeenCalledWith({
       relaySessionId: "relay-1",
       connId: "conn-1",
-      sessionKey: "main",
+      sessionKey: workerSessionKey,
       runId: "run-voice-1",
       callId: "call-1",
     });
@@ -2455,7 +2720,7 @@ describe("talk.client.toolCall handler", () => {
     },
   );
 
-  it("rejects client tool calls that are not the agent consult tool", async () => {
+  it("executes configured gateway tools on the client-owned lane", async () => {
     const respond = vi.fn();
 
     await talkHandlers["talk.client.toolCall"]({
@@ -2463,20 +2728,233 @@ describe("talk.client.toolCall handler", () => {
       params: {
         sessionKey: "main",
         callId: "call-1",
-        name: "unknown_tool",
+        name: "control_home",
+        args: { command: "turn on the lights" },
       },
       client: { connId: "conn-1" } as never,
       isWebchatConnect: () => false,
       respond: respond as never,
       context: {
-        getRuntimeConfig: () => ({}) as OpenClawConfig,
+        getRuntimeConfig: () =>
+          ({
+            talk: {
+              realtime: {
+                gatewayTools: [
+                  {
+                    name: "control_home",
+                    description: "Control Home Assistant.",
+                    exec: "/usr/local/bin/control-home",
+                  },
+                ],
+              },
+            },
+          }) as OpenClawConfig,
       } as never,
     });
 
     expect(mocks.chatSend).not.toHaveBeenCalled();
+    expect(mocks.runTalkRealtimeGatewayTool).toHaveBeenCalledWith(
+      "/usr/local/bin/control-home",
+      ["turn on the lights"],
+      expect.objectContaining({
+        encoding: "utf8",
+        maxBuffer: 64 * 1024,
+        shell: false,
+        timeout: 12_000,
+        windowsHide: true,
+      }),
+    );
+    expectRespondOk(respond, {
+      result: { response: "Lights are on." },
+    });
+  });
+
+  it("rejects unknown tools on the client-owned lane", async () => {
+    const respond = vi.fn();
+
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "1", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        callId: "call-1",
+        name: "not_configured",
+        args: { command: "turn on the lights" },
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {
+        getRuntimeConfig: () =>
+          ({
+            talk: {
+              realtime: {
+                gatewayTools: [
+                  {
+                    name: "control_home",
+                    description: "Control Home Assistant.",
+                    exec: "/usr/local/bin/control-home",
+                  },
+                ],
+              },
+            },
+          }) as OpenClawConfig,
+      } as never,
+    });
+
+    expect(mocks.runTalkRealtimeGatewayTool).not.toHaveBeenCalled();
     expectRespondError(respond, {
       code: ErrorCodes.INVALID_REQUEST,
-      message: "unsupported realtime Talk tool: unknown_tool",
+      message: "unsupported realtime Talk tool: not_configured",
+    });
+  });
+
+  it("allows a reconnected connection from the owning signed device", async () => {
+    const respond = vi.fn();
+    rememberTalkClientSession({
+      connId: "conn-old",
+      deviceId: "device-owner",
+      sessionKey: "main",
+    });
+
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "1", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        callId: "call-1",
+        name: "control_home",
+        args: { command: "which lights are on" },
+      },
+      client: {
+        connId: "conn-new",
+        connect: { device: { id: "device-owner" } },
+      } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {
+        getRuntimeConfig: () =>
+          ({
+            talk: {
+              realtime: {
+                gatewayTools: [
+                  {
+                    name: "control_home",
+                    description: "Control Home Assistant.",
+                    exec: "/usr/local/bin/control-home",
+                  },
+                ],
+              },
+            },
+          }) as OpenClawConfig,
+      } as never,
+    });
+
+    expect(mocks.runTalkRealtimeGatewayTool).toHaveBeenCalledOnce();
+    expectRespondOk(respond, {
+      result: { response: "Lights are on." },
+    });
+  });
+
+  it("allows one-shot loopback CLI calls under shared gateway admin auth", async () => {
+    const cliClient = (connId: string) =>
+      ({
+        connId,
+        isLocal: true,
+        usesSharedGatewayAuth: true,
+        connect: {
+          client: {
+            id: "cli",
+            mode: "cli",
+          },
+        },
+      }) as never;
+    const ownerId = resolveTalkClientSessionOwnerId(cliClient("conn-cli-create"));
+    expect(ownerId).toBeDefined();
+    rememberTalkClientSession({
+      connId: "conn-cli-create",
+      deviceId: ownerId,
+      sessionKey: "main",
+    });
+    const respond = vi.fn();
+
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "1", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        callId: "call-1",
+        name: "control_home",
+        args: { command: "which lights are on" },
+      },
+      client: cliClient("conn-cli-tool-call"),
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {
+        getRuntimeConfig: () =>
+          ({
+            talk: {
+              realtime: {
+                gatewayTools: [
+                  {
+                    name: "control_home",
+                    description: "Control Home Assistant.",
+                    exec: "/usr/local/bin/control-home",
+                  },
+                ],
+              },
+            },
+          }) as OpenClawConfig,
+      } as never,
+    });
+
+    expect(mocks.runTalkRealtimeGatewayTool).toHaveBeenCalledOnce();
+    expectRespondOk(respond, {
+      result: { response: "Lights are on." },
+    });
+  });
+
+  it("rejects a foreign signed device for the same session key", async () => {
+    const respond = vi.fn();
+    rememberTalkClientSession({
+      connId: "conn-owner",
+      deviceId: "device-owner",
+      sessionKey: "main",
+    });
+
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "1", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        callId: "call-1",
+        name: "control_home",
+        args: { command: "which lights are on" },
+      },
+      client: {
+        connId: "conn-foreign",
+        connect: { device: { id: "device-foreign" } },
+      } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {
+        getRuntimeConfig: () =>
+          ({
+            talk: {
+              realtime: {
+                gatewayTools: [
+                  {
+                    name: "control_home",
+                    description: "Control Home Assistant.",
+                    exec: "/usr/local/bin/control-home",
+                  },
+                ],
+              },
+            },
+          }) as OpenClawConfig,
+      } as never,
+    });
+
+    expect(mocks.runTalkRealtimeGatewayTool).not.toHaveBeenCalled();
+    expectRespondError(respond, {
+      code: ErrorCodes.INVALID_REQUEST,
+      message: "talk.client.toolCall requires an active browser-owned Talk session",
     });
   });
 });
@@ -2563,7 +3041,82 @@ describe("talk.client.steer handler", () => {
     expect(mocks.controlRealtimeVoiceAgentRun).not.toHaveBeenCalled();
     expectRespondError(respond, {
       code: ErrorCodes.INVALID_REQUEST,
-      message: "talk.client.steer requires an active browser-owned Talk run",
+      message: "talk.client.steer requires an active browser-owned Talk session",
+    });
+  });
+
+  it("allows durable job control after the browser-owned Talk run ends", async () => {
+    const respond = vi.fn();
+    rememberTalkClientSession({
+      connId: "conn-1",
+      sessionKey: "agent:main:main",
+    });
+    mocks.controlRealtimeVoiceAgentRun.mockResolvedValue({
+      ok: true,
+      mode: "cancel",
+      sessionKey: "agent:main:main",
+      active: false,
+      aborted: true,
+      target: "task",
+      jobId: "job-1",
+      message: "Cancelled the job.",
+      speak: true,
+      show: true,
+      suppress: false,
+    });
+
+    await talkHandlers["talk.client.steer"]({
+      req: { type: "req", id: "1", method: "talk.client.steer" },
+      params: {
+        sessionKey: "agent:main:main",
+        text: "cancel that job",
+        mode: "cancel",
+        jobId: "job-1",
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: { chatAbortControllers: new Map() } as never,
+    });
+
+    expect(mocks.controlRealtimeVoiceAgentRun).toHaveBeenCalledWith({
+      sessionKey: "agent:main:main",
+      text: "cancel that job",
+      mode: "cancel",
+      jobId: "job-1",
+    });
+    expectRespondOk(respond, {
+      ok: true,
+      mode: "cancel",
+      jobId: "job-1",
+    });
+  });
+
+  it("rejects durable job control from a different browser connection", async () => {
+    const respond = vi.fn();
+    rememberTalkClientSession({
+      connId: "conn-2",
+      sessionKey: "agent:main:main",
+    });
+
+    await talkHandlers["talk.client.steer"]({
+      req: { type: "req", id: "1", method: "talk.client.steer" },
+      params: {
+        sessionKey: "agent:main:main",
+        text: "cancel that job",
+        mode: "cancel",
+        jobId: "job-1",
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: { chatAbortControllers: new Map() } as never,
+    });
+
+    expect(mocks.controlRealtimeVoiceAgentRun).not.toHaveBeenCalled();
+    expectRespondError(respond, {
+      code: ErrorCodes.INVALID_REQUEST,
+      message: "talk.client.steer requires an active browser-owned Talk session",
     });
   });
 
@@ -2682,6 +3235,69 @@ describe("talk.client.create handler", () => {
     expect(createInput).not.toHaveProperty("providers");
     expect(createInput).not.toHaveProperty("transport");
     expectRespondOk(respond, { provider: "openai", transport: "webrtc" });
+    expect(
+      claimOwnedTalkClientSession({
+        connId: "conn-1",
+        sessionKey: "main",
+      }),
+    ).toBe(true);
+  });
+
+  it("advertises configured gateway tools so client-owned sessions can call them", async () => {
+    // Regression: client-owned (WebRTC) sessions hardcoded the two built-in tools, so configured
+    // gateway tools like control_home were never offered to the model even though
+    // talk.client.toolCall was ready to execute them. Smart home silently died on WebRTC.
+    const createBrowserSession = vi.fn(async (_input: unknown) => ({
+      provider: "openai",
+      transport: "webrtc" as const,
+      clientSecret: "secret",
+    }));
+    mocks.resolveConfiguredRealtimeVoiceProvider.mockReturnValue({
+      provider: {
+        id: "openai",
+        label: "OpenAI Realtime",
+        isConfigured: () => true,
+        createBrowserSession,
+        createBridge: vi.fn(),
+      },
+      providerConfig: { apiKey: "openai-key", model: "gpt-realtime" },
+    });
+
+    const respond = vi.fn();
+    await talkHandlers["talk.client.create"]({
+      req: { type: "req", id: "1", method: "talk.client.create" },
+      params: { sessionKey: "main" },
+      client: { connId: "conn-tools" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {
+        getRuntimeConfig: () =>
+          ({
+            talk: {
+              realtime: {
+                provider: "openai",
+                providers: { openai: { apiKey: "openai-key" } },
+                model: "gpt-realtime",
+                gatewayTools: [
+                  {
+                    name: "control_home",
+                    description: "Control the smart home.",
+                    exec: "/usr/local/bin/control-home",
+                  },
+                ],
+                clientTools: [{ name: "open_app", description: "Open an app." }],
+              },
+            },
+          }) as OpenClawConfig,
+      } as never,
+    });
+
+    const createInput = mockCallArg(createBrowserSession) as Record<string, unknown>;
+    const toolNames = (createInput.tools as { name: string }[]).map((tool) => tool.name);
+    expect(toolNames).toContain("control_home");
+    expect(toolNames).toContain("open_app");
+    // The built-in contracts must survive alongside configured tools.
+    expect(toolNames).toContain(REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME);
   });
 
   it("uses agents.defaults.voiceModel as the realtime default model", async () => {

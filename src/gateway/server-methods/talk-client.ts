@@ -1,3 +1,4 @@
+import { resolveExpiresAtMsFromDurationOrEpoch } from "@openclaw/normalization-core/number-coercion";
 // Talk client methods create browser-owned realtime voice sessions and route
 // client tool calls back into OpenClaw agent consult/control flows.
 import {
@@ -12,19 +13,28 @@ import {
   validateTalkClientSteerParams,
   validateTalkClientToolCallParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import {
-  REALTIME_VOICE_AGENT_CONSULT_TOOL,
-  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
-} from "../../talk/agent-consult-tool.js";
-import { REALTIME_VOICE_AGENT_CONTROL_TOOL } from "../../talk/agent-run-control-shared.js";
+import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../talk/agent-consult-tool.js";
 import { controlRealtimeVoiceAgentRun } from "../../talk/agent-run-control.js";
 import { resolveConfiguredRealtimeVoiceProvider } from "../../talk/provider-resolver.js";
+import { reportRealtimeVoiceHealth } from "../../talk/voice-health.js";
 import { startTalkRealtimeAgentConsult } from "../talk-agent-consult.js";
+import {
+  claimOwnedTalkClientSession,
+  rememberTalkClientSession,
+  resolveTalkClientSessionOwnerId,
+} from "../talk-client-session-registry.js";
+import {
+  formatGatewayToolExecutionError,
+  GATEWAY_TOOL_MAX_BUFFER_BYTES,
+  GATEWAY_TOOL_TIMEOUT_MS,
+  runTalkRealtimeGatewayTool,
+} from "../talk-realtime-relay.js";
 import { formatForLog } from "../ws-log.js";
 import {
   buildRealtimeInstructions,
   buildRealtimeVoiceLaunchOptions,
   buildTalkRealtimeConfig,
+  buildTalkRealtimeSessionTools,
   isUnsupportedBrowserWebRtcSession,
 } from "./talk-shared.js";
 import type { GatewayRequestHandlers } from "./types.js";
@@ -36,7 +46,7 @@ import type { GatewayRequestHandlers } from "./types.js";
  * calls back into OpenClaw agent consult runs.
  */
 export const talkClientHandlers: GatewayRequestHandlers = {
-  "talk.client.create": async ({ params, respond, context }) => {
+  "talk.client.create": async ({ params, respond, context, client }) => {
     if (!validateTalkClientCreateParams(params)) {
       respond(
         false,
@@ -132,13 +142,32 @@ export const talkClientHandlers: GatewayRequestHandlers = {
           cfg: runtimeConfig,
           providerConfig: resolution.providerConfig,
           instructions: buildRealtimeInstructions(realtimeConfig.instructions),
-          tools: [REALTIME_VOICE_AGENT_CONSULT_TOOL, REALTIME_VOICE_AGENT_CONTROL_TOOL],
+          // Client-owned sessions run configured gateway tools through talk.client.toolCall, so they
+          // must advertise the same list as the relay; hardcoding the built-ins here silently
+          // stripped every configured tool (control_home) from WebRTC voice.
+          tools: buildTalkRealtimeSessionTools(
+            realtimeConfig.clientTools,
+            realtimeConfig.gatewayTools,
+          ),
           ...launchOptions,
         });
         if (
           !isUnsupportedBrowserWebRtcSession(session) &&
           (!transport || session.transport === transport)
         ) {
+          rememberTalkClientSession({
+            connId: client?.connId,
+            deviceId: resolveTalkClientSessionOwnerId(client),
+            sessionKey: normalizeOptionalString(params.sessionKey),
+          });
+          const voiceHealthExpiresAtMs =
+            resolveExpiresAtMsFromDurationOrEpoch(session.expiresAt) ?? Date.now() + 30_000;
+          reportRealtimeVoiceHealth({
+            sourceId: `browser:${client?.connId ?? "unknown"}`,
+            active: true,
+            healthy: true,
+            expiresAtMs: voiceHealthExpiresAtMs,
+          });
           respond(true, session, undefined);
           return;
         }
@@ -163,6 +192,12 @@ export const talkClientHandlers: GatewayRequestHandlers = {
         ),
       );
     } catch (err) {
+      reportRealtimeVoiceHealth({
+        sourceId: `browser:${client?.connId ?? "unknown"}`,
+        active: true,
+        healthy: false,
+        expiresAtMs: Date.now() + 10_000,
+      });
       respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));
     }
   },
@@ -179,14 +214,69 @@ export const talkClientHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    if (params.name !== REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
+    if (
+      !claimOwnedTalkClientSession({
+        connId: request.client?.connId,
+        deviceId: resolveTalkClientSessionOwnerId(request.client),
+        sessionKey: params.sessionKey,
+      })
+    ) {
       respond(
         false,
         undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, `unsupported realtime Talk tool: ${params.name}`),
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          "talk.client.toolCall requires an active browser-owned Talk session",
+        ),
       );
       return;
     }
+    if (params.name !== REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
+      // Client-owned realtime sessions send tool calls back through this RPC,
+      // so configured gateway tools must use the same bounded runner as relays.
+      const gatewayTool = buildTalkRealtimeConfig(
+        request.context.getRuntimeConfig(),
+        undefined,
+      ).gatewayTools?.find((tool) => tool.name === params.name);
+      if (!gatewayTool) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, `unsupported realtime Talk tool: ${params.name}`),
+        );
+        return;
+      }
+      const argKey = gatewayTool.argKey ?? "command";
+      const rawArgs = params.args;
+      const argument =
+        rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+          ? (rawArgs as Record<string, unknown>)[argKey]
+          : undefined;
+      if (typeof argument !== "string") {
+        respond(true, { result: { error: `Gateway tool requires string argument "${argKey}".` } });
+        return;
+      }
+      try {
+        const execution = await runTalkRealtimeGatewayTool(gatewayTool.exec, [argument], {
+          encoding: "utf8",
+          env: process.env,
+          maxBuffer: GATEWAY_TOOL_MAX_BUFFER_BYTES,
+          shell: false,
+          timeout: GATEWAY_TOOL_TIMEOUT_MS,
+          windowsHide: true,
+        });
+        respond(true, { result: { response: execution.stdout.trim() || "Done." } });
+      } catch (error) {
+        respond(true, { result: { error: formatGatewayToolExecutionError(error) } });
+      }
+      return;
+    }
+    reportRealtimeVoiceHealth({
+      sourceId: `browser:${request.client?.connId ?? "unknown"}`,
+      active: true,
+      healthy: true,
+      expiresAtMs: Date.now() + 30_000,
+    });
 
     const result = await startTalkRealtimeAgentConsult({
       context: request.context,
@@ -208,6 +298,8 @@ export const talkClientHandlers: GatewayRequestHandlers = {
       {
         runId: result.runId,
         idempotencyKey: result.idempotencyKey,
+        sessionKey: result.sessionKey,
+        receipt: result.receipt,
       },
       undefined,
     );
@@ -224,7 +316,13 @@ export const talkClientHandlers: GatewayRequestHandlers = {
       );
       return;
     }
+    const ownsBrowserTalkSession = claimOwnedTalkClientSession({
+      connId: client?.connId,
+      deviceId: resolveTalkClientSessionOwnerId(client),
+      sessionKey: params.sessionKey,
+    });
     if (
+      !ownsBrowserTalkSession &&
       !hasOwnedActiveTalkClientRun({
         context,
         clientConnId: client?.connId,
@@ -236,16 +334,19 @@ export const talkClientHandlers: GatewayRequestHandlers = {
         undefined,
         errorShape(
           ErrorCodes.INVALID_REQUEST,
-          "talk.client.steer requires an active browser-owned Talk run",
+          "talk.client.steer requires an active browser-owned Talk session",
         ),
       );
       return;
     }
     try {
+      // Exact job control is authorized by the durable task's owner key in
+      // controlRealtimeVoiceAgentRun, including after the live Talk run ends.
       const result = await controlRealtimeVoiceAgentRun({
         sessionKey: params.sessionKey,
         text: params.text,
         mode: params.mode,
+        ...(params.jobId ? { jobId: params.jobId } : {}),
       });
       respond(true, result, undefined);
     } catch (err) {

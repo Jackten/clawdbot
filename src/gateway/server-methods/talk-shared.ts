@@ -13,23 +13,66 @@ import {
   resolveSupportedVoiceModelRefs,
   type VoiceModelProvider,
 } from "../../../packages/speech-core/voice-models.js";
-import type { TalkRealtimeConfig } from "../../config/types.gateway.js";
+import type {
+  TalkRealtimeClientToolConfig,
+  TalkRealtimeConfig,
+  TalkRealtimeGatewayToolConfig,
+} from "../../config/types.gateway.js";
 import type { OpenClawConfig } from "../../config/types.js";
 import {
   getRealtimeTranscriptionProvider,
   listRealtimeTranscriptionProviders,
 } from "../../realtime-transcription/provider-registry.js";
 import type { RealtimeTranscriptionProviderConfig } from "../../realtime-transcription/provider-types.js";
-import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../talk/agent-consult-tool.js";
-import { REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME } from "../../talk/agent-run-control-shared.js";
+import {
+  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+  resolveRealtimeVoiceAgentConsultTools,
+} from "../../talk/agent-consult-tool.js";
+import {
+  REALTIME_VOICE_AGENT_CONTROL_TOOL,
+  REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME,
+} from "../../talk/agent-run-control-shared.js";
 import { listRealtimeVoiceProviders } from "../../talk/provider-registry.js";
 import type {
   RealtimeVoiceBrowserSession,
   RealtimeVoiceProviderConfig,
+  RealtimeVoiceTool,
 } from "../../talk/provider-types.js";
 import type { TalkEvent } from "../../talk/talk-events.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import type { TalkHandoffTurnResult } from "../talk-handoff.js";
+
+/**
+ * Build the realtime tool list advertised to a provider session.
+ *
+ * Both transports must advertise the same tools: gateway-relay sessions and client-owned (WebRTC)
+ * sessions execute configured gateway tools through the same bounded runner, so a transport that
+ * advertises only the built-ins silently loses every configured tool (a model cannot call a tool it
+ * was never offered) while the executor still sits there ready. Keep this the single source.
+ */
+export function buildTalkRealtimeSessionTools(
+  clientTools: TalkRealtimeClientToolConfig[] | undefined,
+  gatewayTools: TalkRealtimeGatewayToolConfig[] | undefined,
+): RealtimeVoiceTool[] {
+  const configuredTools = [...(gatewayTools ?? []), ...(clientTools ?? [])].map(
+    (tool): RealtimeVoiceTool => ({
+      type: "function",
+      name: tool.name,
+      description: tool.description,
+      // Provider bridges own JSON Schema compatibility; config preserves this payload verbatim.
+      parameters:
+        tool.parameters === undefined
+          ? { type: "object", properties: {} }
+          : (tool.parameters as RealtimeVoiceTool["parameters"]),
+    }),
+  );
+  // The shared resolver keeps consult first and prevents later tools from replacing it.
+  // Inserting control before config applies the same guard to both built-in contracts.
+  return resolveRealtimeVoiceAgentConsultTools("owner", [
+    REALTIME_VOICE_AGENT_CONTROL_TOOL,
+    ...configuredTools,
+  ]);
+}
 
 export function canUseTalkDirectTools(client: { connect?: { scopes?: string[] } } | null): boolean {
   const scopes = Array.isArray(client?.connect?.scopes) ? client.connect.scopes : [];

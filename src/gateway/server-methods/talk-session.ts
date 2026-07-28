@@ -8,6 +8,7 @@ import {
   ErrorCodes,
   errorShape,
   validateTalkSessionAppendAudioParams,
+  validateTalkSessionAttachImageParams,
   validateTalkSessionCancelOutputParams,
   validateTalkSessionCancelTurnParams,
   validateTalkSessionCloseParams,
@@ -17,15 +18,8 @@ import {
   validateTalkSessionSubmitToolResultParams,
   validateTalkSessionTurnParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import type {
-  TalkRealtimeClientToolConfig,
-  TalkRealtimeGatewayToolConfig,
-} from "../../config/types.gateway.js";
-import { resolveRealtimeVoiceAgentConsultTools } from "../../talk/agent-consult-tool.js";
-import { REALTIME_VOICE_AGENT_CONTROL_TOOL } from "../../talk/agent-run-control-shared.js";
 import { controlRealtimeVoiceAgentRun } from "../../talk/agent-run-control.js";
 import { resolveConfiguredRealtimeVoiceProvider } from "../../talk/provider-resolver.js";
-import type { RealtimeVoiceTool } from "../../talk/provider-types.js";
 import type { TalkBrain, TalkMode, TalkTransport } from "../../talk/talk-events.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { resolveSessionKeyFromResolveParams } from "../sessions-resolve.js";
@@ -41,6 +35,7 @@ import {
 } from "../talk-handoff.js";
 import {
   cancelTalkRealtimeRelayTurn,
+  attachTalkRealtimeRelayImage,
   createTalkRealtimeRelaySession,
   sendTalkRealtimeRelayAudio,
   steerTalkRealtimeRelayAgentRun,
@@ -66,6 +61,7 @@ import {
   buildRealtimeInstructions,
   buildRealtimeVoiceLaunchOptions,
   buildTalkRealtimeConfig,
+  buildTalkRealtimeSessionTools,
   buildTalkTranscriptionConfig,
   canUseTalkDirectTools,
   resolveConfiguredRealtimeTranscriptionProvider,
@@ -82,30 +78,6 @@ import { assertValidParams } from "./validation.js";
  * can enforce the correct connection ownership for its concrete backend.
  */
 type ManagedRoomTalkSession = Extract<UnifiedTalkSessionRecord, { kind: "managed-room" }>;
-
-function buildTalkRealtimeRelayTools(
-  clientTools: TalkRealtimeClientToolConfig[] | undefined,
-  gatewayTools: TalkRealtimeGatewayToolConfig[] | undefined,
-): RealtimeVoiceTool[] {
-  const configuredTools = [...(gatewayTools ?? []), ...(clientTools ?? [])].map(
-    (tool): RealtimeVoiceTool => ({
-      type: "function",
-      name: tool.name,
-      description: tool.description,
-      // Provider bridges own JSON Schema compatibility; config preserves this payload verbatim.
-      parameters:
-        tool.parameters === undefined
-          ? { type: "object", properties: {} }
-          : (tool.parameters as RealtimeVoiceTool["parameters"]),
-    }),
-  );
-  // The shared resolver keeps consult first and prevents later tools from replacing it.
-  // Inserting control before config applies the same guard to both built-in contracts.
-  return resolveRealtimeVoiceAgentConsultTools("owner", [
-    REALTIME_VOICE_AGENT_CONTROL_TOOL,
-    ...configuredTools,
-  ]);
-}
 
 function normalizeTalkSessionMode(params: { mode?: string; transport?: string }): TalkMode {
   const mode = normalizeOptionalLowercaseString(params.mode) as TalkMode | undefined;
@@ -358,7 +330,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
           provider: resolution.provider,
           providerConfig: withRealtimeBrowserOverrides(resolution.providerConfig, launchOptions),
           instructions: buildRealtimeInstructions(realtimeConfig.instructions),
-          tools: buildTalkRealtimeRelayTools(
+          tools: buildTalkRealtimeSessionTools(
             realtimeConfig.clientTools,
             realtimeConfig.gatewayTools,
           ),
@@ -501,6 +473,39 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
         respond,
         "talk.session.appendAudio is not supported for managed-room sessions",
       );
+    } catch (err) {
+      respondUnavailable(respond, err);
+    }
+  },
+  "talk.session.attachImage": async ({ params, respond, client }) => {
+    if (
+      !assertValidParams(
+        params,
+        validateTalkSessionAttachImageParams,
+        "talk.session.attachImage",
+        respond,
+      )
+    ) {
+      return;
+    }
+    try {
+      const session = getUnifiedTalkSession(params.sessionId);
+      if (session.kind !== "realtime-relay") {
+        respondInvalidRequest(
+          respond,
+          "talk.session.attachImage is only supported for realtime relay sessions",
+        );
+        return;
+      }
+      const connId = requireUnifiedTalkSessionConn(session, client?.connId);
+      const result = attachTalkRealtimeRelayImage({
+        relaySessionId: session.relaySessionId,
+        connId,
+        imageBase64: params.imageBase64,
+        mimeType: params.mimeType,
+        note: params.note,
+      });
+      respondOk(respond, { ok: true, ...result });
     } catch (err) {
       respondUnavailable(respond, err);
     }
@@ -676,12 +681,14 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
       const session = getUnifiedTalkSession(params.sessionId);
       if (session.kind === "realtime-relay") {
         const connId = requireUnifiedTalkSessionConn(session, client?.connId);
+        const jobId = normalizeOptionalString(params.jobId);
         const result = await steerTalkRealtimeRelayAgentRun({
           relaySessionId: session.relaySessionId,
           connId,
           sessionKey: normalizeOptionalString(params.sessionKey),
           text: params.text,
           mode: normalizeOptionalString(params.mode),
+          ...(jobId ? { jobId } : {}),
         });
         respondOk(respond, result);
         return;
@@ -712,6 +719,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
         sessionKey,
         text: params.text,
         mode: params.mode,
+        ...(params.jobId ? { jobId: params.jobId } : {}),
         recentEvents: handoff?.room.talk.recentEvents,
       });
       respondOk(respond, result);
