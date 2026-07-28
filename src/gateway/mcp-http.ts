@@ -244,6 +244,7 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
           sourceReplyDeliveryMode: requestContext.sourceReplyDeliveryMode,
           requireExplicitMessageTarget: requestContext.requireExplicitMessageTarget,
           senderIsOwner: requestContext.senderIsOwner,
+          requesterNodeId: requestContext.requesterNodeId,
         });
 
         logMcpLoopbackTraffic("request", {

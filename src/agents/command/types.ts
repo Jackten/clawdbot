@@ -102,6 +102,8 @@ export type AgentCommandOpts = {
   runContext?: AgentRunContext;
   /** Device-scoped operator session allowed to review approvals initiated by this run. */
   approvalReviewerDeviceId?: string;
+  /** Authenticated node connection that originated this run. */
+  requesterNodeId?: string;
   /** Internal trusted exec approval follow-up elevated defaults. */
   bashElevated?: ExecElevatedDefaults;
   /** Trusted sender identity bit for command/channel-action auth; defaults true for local CLI calls. */

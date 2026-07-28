@@ -150,6 +150,8 @@ export function createOpenClawTools(
     requesterAgentIdOverride?: string;
     /** Trusted sender identity bit for channel action auth. */
     senderIsOwner?: boolean;
+    /** Authenticated node connection that originated this turn. */
+    requesterNodeId?: string;
     /** Restrict the cron tool to self-removing this active cron job. */
     cronSelfRemoveOnlyJobId?: string;
     /** Require explicit message targets (no implicit last-route sends). */
@@ -596,7 +598,16 @@ export function createOpenClawTools(
   const hookAgentId = options?.requesterAgentIdOverride ?? sessionAgentId;
   const gatewayCallerIdentity =
     hookAgentId && options?.agentSessionKey?.trim()
-      ? { agentId: hookAgentId, sessionKey: options.agentSessionKey.trim() }
+      ? {
+          agentId: hookAgentId,
+          sessionKey: options.agentSessionKey.trim(),
+          ...(options.requesterNodeId?.trim()
+            ? { allowedNodeId: options.requesterNodeId.trim() }
+            : {}),
+          ...(options.senderIsOwner !== undefined
+            ? { senderIsOwner: options.senderIsOwner === true }
+            : {}),
+        }
       : undefined;
   const wrapGatewayCallerIdentity = (tool: AnyAgentTool) =>
     wrapToolWithGatewayCallerIdentity(tool, gatewayCallerIdentity);

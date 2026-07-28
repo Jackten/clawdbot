@@ -159,6 +159,7 @@ import {
 } from "../chat-attachments.js";
 import { resolveAssistantAvatarUrl } from "../control-ui-shared.js";
 import { ADMIN_SCOPE } from "../method-scopes.js";
+import { resolveRequesterNodeId } from "../requester-node.js";
 import {
   emitGatewaySessionEndPluginHook,
   emitGatewaySessionStartPluginHook,
@@ -1312,6 +1313,7 @@ export const agentHandlers: GatewayRequestHandlers = {
     const ownerConnId = typeof client?.connId === "string" ? client.connId : undefined;
     const ownerDeviceId =
       typeof client?.connect?.device?.id === "string" ? client.connect.device.id : undefined;
+    const requesterNodeId = resolveRequesterNodeId(client, context.nodeRegistry);
     const reservePreAcceptedAgentDedupe = (sessionKey?: string, dedupeAgentId?: string) => {
       if (agentDedupeReserved) {
         return;
@@ -3339,6 +3341,7 @@ export const agentHandlers: GatewayRequestHandlers = {
               internalEvents: request.internalEvents,
               inputProvenance,
               senderIsOwner: clientHasAdminScope(client),
+              requesterNodeId,
               sessionEffects,
               skipInitialSessionTouch: skipAgentInitialSessionTouch,
               preserveUserFacingSessionModelState,

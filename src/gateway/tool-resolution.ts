@@ -59,6 +59,7 @@ export function resolveGatewayScopedTools(params: {
   agentTo?: string;
   agentThreadId?: string;
   senderIsOwner?: boolean;
+  requesterNodeId?: string;
   allowGatewaySubagentBinding?: boolean;
   allowMediaInvokeCommands?: boolean;
   surface?: GatewayScopedToolSurface;
@@ -124,10 +125,17 @@ export function resolveGatewayScopedTools(params: {
     surface === "http"
       ? DEFAULT_GATEWAY_HTTP_TOOL_DENY.filter((name) => !gatewayToolsCfg?.allow?.includes(name))
       : [];
-  const ownerOnlyGatewayDeny =
-    params.senderIsOwner === false || (surface === "http" && params.senderIsOwner !== true)
-      ? [...GATEWAY_OWNER_ONLY_CORE_TOOLS]
-      : [];
+  const senderNeedsOwnerOnlyDeny =
+    params.senderIsOwner === false || (surface === "http" && params.senderIsOwner !== true);
+  // Loopback requesterNodeId comes only from a signed, session-bound bearer. It
+  // unlocks nodes while the gateway still enforces that exact node on every call.
+  const allowRequesterScopedNodes =
+    surface === "loopback" && Boolean(params.requesterNodeId?.trim());
+  const ownerOnlyGatewayDeny = senderNeedsOwnerOnlyDeny
+    ? GATEWAY_OWNER_ONLY_CORE_TOOLS.filter(
+        (toolName) => toolName !== "nodes" || !allowRequesterScopedNodes,
+      )
+    : [];
   // HTTP callers start with additional surface denies because they cross auth only.
   const workspaceDir = resolveAgentWorkspaceDir(
     params.cfg,
@@ -185,6 +193,7 @@ export function resolveGatewayScopedTools(params: {
     onYield: params.onYield,
     requireExplicitMessageTarget: params.requireExplicitMessageTarget,
     senderIsOwner: params.senderIsOwner,
+    requesterNodeId: params.requesterNodeId,
     allowGatewaySubagentBinding: params.allowGatewaySubagentBinding,
     allowMediaInvokeCommands: params.allowMediaInvokeCommands,
     disablePluginTools: params.disablePluginTools,

@@ -52,6 +52,8 @@ describe("agent runtime identity token", () => {
     const token = firstProcess.mintAgentRuntimeIdentityToken({
       agentId: "main",
       sessionKey: "session-1",
+      allowedNodeId: "qa-node-5554",
+      senderIsOwner: false,
     });
 
     const persistedToken = readExecApprovals(home).socket?.token;
@@ -63,6 +65,8 @@ describe("agent runtime identity token", () => {
       kind: "agentRuntime",
       agentId: "main",
       sessionKey: "session-1",
+      allowedNodeId: "qa-node-5554",
+      senderIsOwner: false,
     });
   });
 

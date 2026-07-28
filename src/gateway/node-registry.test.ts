@@ -18,6 +18,7 @@ function makeClient(
   sent: string[] = [],
   opts: {
     clientId?: string;
+    displayName?: string;
     platform?: string;
     version?: string;
     caps?: string[];
@@ -48,6 +49,7 @@ function makeClient(
       maxProtocol: 1,
       client: {
         id: opts.clientId ?? "openclaw-macos",
+        displayName: opts.displayName,
         version: opts.version ?? "1.0.0",
         platform: opts.platform ?? "darwin",
         mode: "node",
@@ -132,6 +134,20 @@ function authorizeSystemRun(registry: NodeRegistry, overrides: Partial<SystemRun
 }
 
 describe("gateway/node-registry", () => {
+  it("applies a display-name override to the connected node", () => {
+    const registry = new NodeRegistry();
+    registry.register(
+      makeClient("conn-1", "node-1", [], {
+        displayName: "Claw",
+      }),
+      {},
+    );
+
+    expect(registry.rename("node-1", "Claw-QA-5554")).toBe(true);
+    expect(registry.get("node-1")?.displayName).toBe("Claw-QA-5554");
+    expect(registry.rename("missing-node", "Claw-QA-5556")).toBe(false);
+  });
+
   it("checks node websocket connectivity with ping/pong", async () => {
     const registry = new NodeRegistry();
     registry.register(

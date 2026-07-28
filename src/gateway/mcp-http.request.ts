@@ -11,6 +11,7 @@ import { safeEqualSecret } from "../security/secret-equal.js";
 import { normalizeMessageChannel } from "../utils/message-channel.js";
 import { getHeader } from "./http-utils.js";
 import { resolveAttachGrant } from "./mcp-grant-store.js";
+import { verifyMcpLoopbackNodeScopeToken } from "./mcp-http.loopback-runtime.js";
 import { isLoopbackAddress } from "./net.js";
 import { checkBrowserOrigin } from "./origin-check.js";
 
@@ -62,6 +63,7 @@ type McpRequestContext = {
   sourceReplyDeliveryMode: SourceReplyDeliveryMode | undefined;
   requireExplicitMessageTarget: boolean | undefined;
   senderIsOwner: boolean | undefined;
+  requesterNodeId: string | undefined;
 };
 
 function resolveScopedSessionKey(cfg: OpenClawConfig, rawSessionKey: string | undefined): string {
@@ -113,7 +115,13 @@ function resolveMcpSender(params: {
   req: IncomingMessage;
   ownerToken: string;
   nonOwnerToken: string;
-}): { senderIsOwner: boolean; boundSessionKey?: string } | undefined {
+}):
+  | {
+      senderIsOwner: boolean;
+      boundSessionKey?: string;
+      requesterNodeId?: string;
+    }
+  | undefined {
   const authHeader = getHeader(params.req, "authorization") ?? "";
   const ownerTokenMatched = safeEqualSecret(authHeader, `Bearer ${params.ownerToken}`);
   const nonOwnerTokenMatched = safeEqualSecret(authHeader, `Bearer ${params.nonOwnerToken}`);
@@ -121,6 +129,19 @@ function resolveMcpSender(params: {
     return { senderIsOwner: ownerTokenMatched };
   }
   const grantToken = authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length) : "";
+  const nodeScope = grantToken
+    ? verifyMcpLoopbackNodeScopeToken(grantToken, {
+        ownerToken: params.ownerToken,
+        nonOwnerToken: params.nonOwnerToken,
+      })
+    : undefined;
+  if (nodeScope) {
+    return {
+      senderIsOwner: nodeScope.senderIsOwner,
+      boundSessionKey: nodeScope.sessionKey,
+      requesterNodeId: nodeScope.requesterNodeId,
+    };
+  }
   const grant = grantToken ? resolveAttachGrant(grantToken) : undefined;
   if (grant) {
     return { senderIsOwner: false, boundSessionKey: grant.sessionKey };
@@ -134,7 +155,11 @@ export function validateMcpLoopbackRequest(params: {
   ownerToken: string;
   nonOwnerToken: string;
   onSseResponse?: (res: ServerResponse) => void;
-}): { senderIsOwner: boolean; boundSessionKey?: string } | null {
+}): {
+  senderIsOwner: boolean;
+  boundSessionKey?: string;
+  requesterNodeId?: string;
+} | null {
   let url: URL;
   try {
     url = new URL(params.req.url ?? "/", `http://${params.req.headers.host ?? "localhost"}`);
@@ -250,7 +275,11 @@ export function validateMcpLoopbackRequest(params: {
     return null;
   }
 
-  return { senderIsOwner: sender.senderIsOwner, boundSessionKey: sender.boundSessionKey };
+  return {
+    senderIsOwner: sender.senderIsOwner,
+    boundSessionKey: sender.boundSessionKey,
+    requesterNodeId: sender.requesterNodeId,
+  };
 }
 
 export async function readMcpHttpBody(
@@ -363,11 +392,15 @@ export function resolveMcpCliCaptureKey(req: IncomingMessage): string | undefine
 export function resolveMcpRequestContext(
   req: IncomingMessage,
   cfg: OpenClawConfig,
-  auth: { senderIsOwner: boolean; boundSessionKey?: string },
+  auth: {
+    senderIsOwner: boolean;
+    boundSessionKey?: string;
+    requesterNodeId?: string;
+  },
 ): McpRequestContext {
   // Grant-authenticated callers get only their server-bound session; spoofable
   // delivery/action headers stay reserved for the gateway-launched loopback client.
-  if (auth.boundSessionKey) {
+  if (auth.boundSessionKey && !auth.requesterNodeId) {
     return {
       sessionKey: auth.boundSessionKey,
       sessionId: undefined,
@@ -381,10 +414,12 @@ export function resolveMcpRequestContext(
       sourceReplyDeliveryMode: undefined,
       requireExplicitMessageTarget: undefined,
       senderIsOwner: auth.senderIsOwner,
+      requesterNodeId: undefined,
     };
   }
   return {
-    sessionKey: resolveScopedSessionKey(cfg, getHeader(req, "x-session-key")),
+    sessionKey:
+      auth.boundSessionKey ?? resolveScopedSessionKey(cfg, getHeader(req, "x-session-key")),
     sessionId: normalizeOptionalString(getHeader(req, "x-openclaw-session-id")),
     messageProvider:
       normalizeMessageChannel(getHeader(req, "x-openclaw-message-channel")) ?? undefined,
@@ -403,5 +438,6 @@ export function resolveMcpRequestContext(
       getHeader(req, "x-openclaw-require-explicit-message-target"),
     ),
     senderIsOwner: auth.senderIsOwner,
+    requesterNodeId: auth.requesterNodeId,
   };
 }

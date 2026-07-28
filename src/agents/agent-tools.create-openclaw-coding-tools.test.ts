@@ -185,6 +185,19 @@ describe("createOpenClawCodingTools", () => {
     expectListIncludes([...values], ["restart", "config.get", "config.patch", "config.apply"]);
   });
 
+  it("gives a non-owner node-origin turn only the node-scoped owner tool", () => {
+    const tools = createOpenClawCodingTools({
+      config: testConfig,
+      senderIsOwner: false,
+      requesterNodeId: "qa-node-5554",
+    });
+    const names = new Set(tools.map((tool) => tool.name));
+
+    expect(names.has("nodes")).toBe(true);
+    expect(names.has("cron")).toBe(false);
+    expect(names.has("gateway")).toBe(false);
+  });
+
   it("does not add Tool Search control tools from the shared factory by default", () => {
     const tools = createOpenClawCodingTools({
       config: {

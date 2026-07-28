@@ -439,6 +439,7 @@ export const handleNodeEvent = async (
           sourceChannel: "voice",
           sourceTool: "gateway.voice.transcript",
         },
+        requesterNodeId: nodeId,
         allowModelOverride: false,
       });
       return undefined;
@@ -626,6 +627,7 @@ export const handleNodeEvent = async (
         timeout:
           typeof link?.timeoutSeconds === "number" ? link.timeoutSeconds.toString() : undefined,
         messageChannel: "node",
+        requesterNodeId: nodeId,
         allowModelOverride: false,
       });
       return undefined;

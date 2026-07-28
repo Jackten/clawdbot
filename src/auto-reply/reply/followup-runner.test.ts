@@ -1272,6 +1272,32 @@ describe("createFollowupRunner auto fallback primary probes", () => {
 });
 
 describe("createFollowupRunner runtime config", () => {
+  it("preserves the requester node scope for embedded queued turns", async () => {
+    runEmbeddedAgentMock.mockResolvedValueOnce({ payloads: [], meta: {} });
+    const runner = createFollowupRunner({
+      typing: createMockTypingController(),
+      typingMode: "instant",
+      sessionKey: "main",
+      defaultModel: "anthropic/claude",
+    });
+
+    await runner(
+      createQueuedRun({
+        run: {
+          requesterNodeId: "qa-node-5554",
+          senderIsOwner: true,
+          approvalReviewerDeviceId: "qa-node-5554",
+        },
+      }),
+    );
+
+    expect(requireLastMockCallArg(runEmbeddedAgentMock, "run embedded agent")).toMatchObject({
+      requesterNodeId: "qa-node-5554",
+      senderIsOwner: true,
+      approvalReviewerDeviceId: "qa-node-5554",
+    });
+  });
+
   it("routes queued followups through CLI runtime dispatch when the model selects a CLI backend", async () => {
     const runtimeConfig: OpenClawConfig = {
       agents: {
@@ -1329,6 +1355,8 @@ describe("createFollowupRunner runtime config", () => {
           messageProvider: "telegram",
           senderId: "sender-42",
           senderIsOwner: true,
+          requesterNodeId: "qa-node-5554",
+          approvalReviewerDeviceId: "qa-node-5554",
           cwd: "/tmp/task-repo",
           inputProvenance: {
             kind: "internal_system",
@@ -1352,6 +1380,8 @@ describe("createFollowupRunner runtime config", () => {
     expect(call.currentMessageId).toBe("reply-42");
     expect(call.senderId).toBe("sender-42");
     expect(call.senderIsOwner).toBe(true);
+    expect(call.requesterNodeId).toBe("qa-node-5554");
+    expect(call.approvalReviewerDeviceId).toBe("qa-node-5554");
     expect(call).toMatchObject({
       sessionId: "session-cli-followup",
       sessionKey: "main",

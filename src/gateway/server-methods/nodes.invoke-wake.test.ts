@@ -370,6 +370,20 @@ function createOperatorClient(params?: { scopes?: string[]; pluginRuntimeOwnerId
   };
 }
 
+function createAgentToolClient(params: { allowedNodeId?: string; senderIsOwner?: boolean }) {
+  return {
+    ...createOperatorClient(),
+    internal: {
+      agentRuntimeIdentity: {
+        kind: "agentRuntime" as const,
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        ...params,
+      },
+    },
+  };
+}
+
 function createNodeClient(nodeId: string, commands?: string[]) {
   return {
     connect: {
@@ -546,6 +560,78 @@ describe("node plugin surface refresh", () => {
     expect(capabilityToken.length).toBeGreaterThan(0);
     expect(capabilityToken).not.toBe("old-token");
     expect(client.pluginSurfaceUrls.canvas).toBe(canvasUrl);
+  });
+});
+
+describe("node.invoke agent node scope", () => {
+  it("rejects a QA turn targeting the owner node before lookup, wake, or invoke", async () => {
+    const nodeRegistry = {
+      get: vi.fn(),
+      invoke: vi.fn().mockResolvedValue({ ok: true }),
+    };
+
+    const respond = await invokeNode({
+      nodeRegistry,
+      client: createAgentToolClient({
+        allowedNodeId: "qa-node-5554",
+        senderIsOwner: true,
+      }),
+      requestParams: { nodeId: "owner-phone-node", command: "app.open" },
+    });
+
+    expect(nodeRegistry.get).not.toHaveBeenCalled();
+    expect(nodeRegistry.invoke).not.toHaveBeenCalled();
+    expect(firstRespondCall(respond)).toEqual([
+      false,
+      undefined,
+      expect.objectContaining({
+        message: "agent turn is not authorized for this node",
+        details: { code: "NODE_SCOPE_VIOLATION" },
+      }),
+    ]);
+  });
+
+  it("rejects an unbound non-owner agent turn", async () => {
+    const nodeRegistry = {
+      get: vi.fn(),
+      invoke: vi.fn().mockResolvedValue({ ok: true }),
+    };
+
+    const respond = await invokeNode({
+      nodeRegistry,
+      client: createAgentToolClient({ senderIsOwner: false }),
+      requestParams: { nodeId: "owner-phone-node", command: "app.open" },
+    });
+
+    expect(nodeRegistry.get).not.toHaveBeenCalled();
+    expect(nodeRegistry.invoke).not.toHaveBeenCalled();
+    expect(firstRespondCall(respond)[2]).toEqual(
+      expect.objectContaining({
+        details: { code: "NODE_BINDING_REQUIRED" },
+      }),
+    );
+  });
+
+  it("allows an unbound owner turn to retain existing phone flows", async () => {
+    const nodeRegistry = {
+      get: vi.fn(() => ({
+        nodeId: "owner-phone-node",
+        commands: ["app.open"],
+        platform: "android",
+      })),
+      invoke: vi.fn().mockResolvedValue({ ok: true, payload: { opened: true } }),
+    };
+
+    const respond = await invokeNode({
+      nodeRegistry,
+      client: createAgentToolClient({ senderIsOwner: true }),
+      requestParams: { nodeId: "owner-phone-node", command: "app.open" },
+    });
+
+    expect(nodeRegistry.invoke).toHaveBeenCalledWith(
+      expect.objectContaining({ nodeId: "owner-phone-node", command: "app.open" }),
+    );
+    expect(firstRespondCall(respond)[0]).toBe(true);
   });
 });
 

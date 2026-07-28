@@ -29,6 +29,8 @@ function requireTool(name: string) {
     disableMessageTool: true,
     pluginToolAllowlist: [name],
     requesterAgentIdOverride: "main",
+    requesterNodeId: "qa-node-5554",
+    senderIsOwner: false,
     wrapBeforeToolCallHook: false,
   }).find((candidate) => candidate.name === name);
   if (!tool?.execute) {
@@ -48,6 +50,8 @@ describe("createOpenClawTools Gateway caller identity", () => {
       {
         agentId: "main",
         sessionKey: "agent:main:discord:channel:123",
+        allowedNodeId: "qa-node-5554",
+        senderIsOwner: false,
       },
     ]);
   });

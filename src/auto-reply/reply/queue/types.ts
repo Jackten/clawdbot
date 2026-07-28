@@ -117,6 +117,8 @@ export type FollowupRun = {
     senderIsOwner?: boolean;
     traceAuthorized?: boolean;
     approvalReviewerDeviceId?: string;
+    /** Authenticated node connection that originated this queued turn. */
+    requesterNodeId?: string;
     sessionFile: string;
     workspaceDir: string;
     /** Task working directory for runtime execution. Defaults to workspaceDir. */

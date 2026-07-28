@@ -302,6 +302,8 @@ export type MsgContext = {
   GatewayClientScopes?: string[];
   /** Gateway device id allowed to review approvals initiated by this turn. */
   ApprovalReviewerDeviceId?: string;
+  /** Authenticated node connection that originated this turn. */
+  RequesterNodeId?: string;
   /** Thread identifier (Telegram topic id or Matrix thread event id). */
   MessageThreadId?: string | number;
   /** Provider-native thread target for reply delivery without making the session thread-scoped. */

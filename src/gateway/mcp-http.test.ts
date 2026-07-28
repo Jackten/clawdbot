@@ -53,6 +53,7 @@ type ScopedToolsCall = {
   sourceReplyDeliveryMode?: string;
   requireExplicitMessageTarget?: boolean;
   senderIsOwner?: boolean;
+  requesterNodeId?: string;
   surface?: string;
   excludeToolNames?: Iterable<string>;
 };
@@ -147,6 +148,8 @@ import {
   markMcpLoopbackToolCallFinished,
   markMcpLoopbackToolCallStarted,
   recordMcpLoopbackToolCallResult,
+  resolveMcpLoopbackBearerToken,
+  verifyMcpLoopbackNodeScopeToken,
   waitForMcpLoopbackToolCallCaptureIdle,
 } from "./mcp-http.loopback-runtime.js";
 import { McpLoopbackToolCache } from "./mcp-http.runtime.js";
@@ -792,7 +795,7 @@ describe("buildMcpToolSchema", () => {
 });
 
 describe("mcp loopback server", () => {
-  it("passes session, account, message channel, and inbound event headers into shared tool resolution", async () => {
+  it("passes a signed node scope and trusted context into shared tool resolution", async () => {
     const port = await getFreePortBlockWithPermissionFallback({
       offsets: [0],
       fallbackBase: 53_000,
@@ -801,9 +804,14 @@ describe("mcp loopback server", () => {
 
     const response = await sendRaw({
       port: serverPort,
-      token: runtime?.nonOwnerToken,
+      token: runtime
+        ? resolveMcpLoopbackBearerToken(runtime, false, {
+            sessionKey: "agent:main:telegram:group:chat123",
+            requesterNodeId: "qa-node-5554",
+          })
+        : undefined,
       headers: jsonHeaders({
-        "x-session-key": "agent:main:telegram:group:chat123",
+        "x-session-key": "agent:main:spoofed",
         "x-openclaw-session-id": "session-123",
         "x-openclaw-account-id": "work",
         "x-openclaw-message-channel": "telegram",
@@ -831,6 +839,7 @@ describe("mcp loopback server", () => {
     expect(call.inboundEventKind).toBe("room_event");
     expect(call.sourceReplyDeliveryMode).toBe("message_tool_only");
     expect(call.requireExplicitMessageTarget).toBe(true);
+    expect(call.requesterNodeId).toBe("qa-node-5554");
     expect(call.surface).toBe("loopback");
     expect(Array.from(call.excludeToolNames ?? [])).toEqual([
       "read",
@@ -840,6 +849,29 @@ describe("mcp loopback server", () => {
       "exec",
       "process",
     ]);
+  });
+
+  it("rejects a tampered node-scoped bearer", async () => {
+    const { runtime, port: serverPort } = await startLoopbackServerForTest();
+    expect(runtime).toBeDefined();
+    const token = resolveMcpLoopbackBearerToken(runtime!, false, {
+      sessionKey: "agent:main:main",
+      requesterNodeId: "qa-node-5554",
+    });
+    const tampered = `${token.slice(0, -1)}${token.endsWith("a") ? "b" : "a"}`;
+
+    expect(verifyMcpLoopbackNodeScopeToken(token, runtime!)).toEqual({
+      senderIsOwner: false,
+      sessionKey: "agent:main:main",
+      requesterNodeId: "qa-node-5554",
+    });
+    expect(verifyMcpLoopbackNodeScopeToken(tampered, runtime!)).toBeUndefined();
+    const response = await sendRaw({
+      port: serverPort,
+      token: `${token}tampered`,
+      body: mcpToolsListBody(),
+    });
+    expect(response.status).toBe(401);
   });
 
   it("binds an attach grant's session and ignores ALL spoofed context headers (no scope-shop)", async () => {
@@ -1013,6 +1045,30 @@ describe("mcp loopback server", () => {
     expect(unknownSecond.toolSchema.map((tool) => tool.name)).toContain("cron");
 
     expect(resolveGatewayScopedToolsMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps requester node scopes in separate loopback cache entries", () => {
+    const cache = new McpLoopbackToolCache();
+    const baseParams = {
+      accountId: undefined,
+      cfg: { session: { mainKey: "main" } } as never,
+      currentChannelId: "node-chat",
+      currentInboundAudio: undefined,
+      currentMessageId: "message-1",
+      currentThreadTs: undefined,
+      inboundEventKind: "user_request" as const,
+      messageProvider: "node",
+      senderIsOwner: true,
+      sessionKey: "agent:main:main",
+      sourceReplyDeliveryMode: undefined,
+    };
+
+    cache.resolve({ ...baseParams, requesterNodeId: "qa-node-5554" });
+    cache.resolve({ ...baseParams, requesterNodeId: "owner-phone-node" });
+
+    expect(resolveGatewayScopedToolsMock).toHaveBeenCalledTimes(2);
+    expect(getScopedToolsCall(0).requesterNodeId).toBe("qa-node-5554");
+    expect(getScopedToolsCall(1).requesterNodeId).toBe("owner-phone-node");
   });
 
   it("caps loopback tool cache cardinality by evicting oldest contexts", () => {

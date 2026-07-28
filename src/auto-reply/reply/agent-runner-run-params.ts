@@ -96,6 +96,7 @@ export function buildEmbeddedRunBaseParams(params: {
     senderIsOwner: params.run.senderIsOwner,
     channelContext: params.run.channelContext,
     approvalReviewerDeviceId: params.run.approvalReviewerDeviceId,
+    requesterNodeId: params.run.requesterNodeId,
     enforceFinalTag,
     silentExpected: params.run.silentExpected,
     allowEmptyAssistantReplyAsSilent: params.run.allowEmptyAssistantReplyAsSilent,

@@ -180,6 +180,7 @@ import {
   createManagedOutgoingImageBlocks,
 } from "../managed-image-attachments.js";
 import { ADMIN_SCOPE } from "../method-scopes.js";
+import { resolveRequesterNodeId } from "../requester-node.js";
 import {
   chatAbortMarkerTimestampMs,
   createChatAbortMarker,
@@ -4480,6 +4481,7 @@ export const chatHandlers: GatewayRequestHandlers = {
         ? [systemProvenanceReceipt, parsedMessage].filter(Boolean).join("\n\n")
         : parsedMessage;
       const queuedFollowupOwnerDeviceId = normalizeOptionalText(client?.connect?.device?.id);
+      const requesterNodeId = resolveRequesterNodeId(client, context.nodeRegistry);
       const queuedFollowupOwnerConnId = normalizeOptionalText(client?.connId);
       const queuedFollowupOwnerKey = queuedFollowupOwnerDeviceId
         ? `device:${queuedFollowupOwnerDeviceId}`
@@ -4534,6 +4536,7 @@ export const chatHandlers: GatewayRequestHandlers = {
             },
         MessageSid: clientRunId,
         ApprovalReviewerDeviceId: queuedFollowupOwnerDeviceId,
+        RequesterNodeId: requesterNodeId,
         ...(!isOperatorUiClient(clientInfo)
           ? {
               SenderId: clientInfo?.id,

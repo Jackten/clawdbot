@@ -183,11 +183,78 @@ function listNodesForClient(params: {
     connectedNodes: params.connectedNodes,
   });
   const nodes = listKnownNodes(catalog);
+  const agentIdentity = params.client?.internal?.agentRuntimeIdentity;
+  if (agentIdentity) {
+    if (agentIdentity.allowedNodeId) {
+      return nodes
+        .filter((node) => node.nodeId === agentIdentity.allowedNodeId)
+        .map((node) => safeNodeReadProjection(node, agentIdentity.allowedNodeId))
+        .filter(isVisibleNode);
+    }
+    if (agentIdentity.senderIsOwner !== true) {
+      return [];
+    }
+  }
   if (canReadPendingNodePairing(params.client)) {
     return nodes;
   }
   const ownDeviceId = nodeReadCallerDeviceId(params.client);
   return nodes.map((node) => safeNodeReadProjection(node, ownDeviceId)).filter(isVisibleNode);
+}
+
+function rejectAgentNodeTarget(
+  client: GatewayClient | null,
+  nodeId: string,
+  respond: RespondFn,
+): boolean {
+  const identity = client?.internal?.agentRuntimeIdentity;
+  if (!identity) {
+    return false;
+  }
+  if (identity.allowedNodeId) {
+    if (identity.allowedNodeId === nodeId) {
+      return false;
+    }
+    respond(
+      false,
+      undefined,
+      errorShape(ErrorCodes.INVALID_REQUEST, "agent turn is not authorized for this node", {
+        details: { code: "NODE_SCOPE_VIOLATION" },
+      }),
+    );
+    return true;
+  }
+  if (identity.senderIsOwner === true) {
+    return false;
+  }
+  respond(
+    false,
+    undefined,
+    errorShape(
+      ErrorCodes.INVALID_REQUEST,
+      "non-owner agent node access requires an authenticated originating node",
+      { details: { code: "NODE_BINDING_REQUIRED" } },
+    ),
+  );
+  return true;
+}
+
+function rejectNonOwnerAgentNodeControlPlane(
+  client: GatewayClient | null,
+  respond: RespondFn,
+): boolean {
+  const identity = client?.internal?.agentRuntimeIdentity;
+  if (!identity || identity.senderIsOwner === true) {
+    return false;
+  }
+  respond(
+    false,
+    undefined,
+    errorShape(ErrorCodes.INVALID_REQUEST, "non-owner agent turns cannot manage node pairing", {
+      details: { code: "NODE_CONTROL_PLANE_FORBIDDEN" },
+    }),
+  );
+  return true;
 }
 
 function normalizeBrowserProxyPath(value: string): string {
@@ -942,13 +1009,16 @@ export const nodeHandlers: GatewayRequestHandlers = {
       respond(true, result, undefined);
     });
   },
-  "node.pair.list": async ({ params, respond }) => {
+  "node.pair.list": async ({ params, respond, client }) => {
     if (!validateNodePairListParams(params)) {
       respondInvalidParams({
         respond,
         method: "node.pair.list",
         validator: validateNodePairListParams,
       });
+      return;
+    }
+    if (rejectNonOwnerAgentNodeControlPlane(client, respond)) {
       return;
     }
     await respondUnavailableOnThrow(respond, async () => {
@@ -966,6 +1036,9 @@ export const nodeHandlers: GatewayRequestHandlers = {
       return;
     }
     const { requestId } = params as { requestId: string };
+    if (rejectNonOwnerAgentNodeControlPlane(client, respond)) {
+      return;
+    }
     // Intentionally fail closed for RPC callers without an explicit scoped session.
     const callerScopes = Array.isArray(client?.connect?.scopes) ? client.connect.scopes : [];
     await respondUnavailableOnThrow(respond, async () => {
@@ -1020,7 +1093,7 @@ export const nodeHandlers: GatewayRequestHandlers = {
       respond(true, approved, undefined);
     });
   },
-  "node.pair.reject": async ({ params, respond, context }) => {
+  "node.pair.reject": async ({ params, respond, context, client }) => {
     if (!validateNodePairRejectParams(params)) {
       respondInvalidParams({
         respond,
@@ -1030,6 +1103,9 @@ export const nodeHandlers: GatewayRequestHandlers = {
       return;
     }
     const { requestId } = params as { requestId: string };
+    if (rejectNonOwnerAgentNodeControlPlane(client, respond)) {
+      return;
+    }
     await respondUnavailableOnThrow(respond, async () => {
       const rejected = await rejectNodePairing(requestId);
       if (!rejected) {
@@ -1126,7 +1202,7 @@ export const nodeHandlers: GatewayRequestHandlers = {
       respond(true, result, undefined);
     });
   },
-  "node.rename": async ({ params, respond }) => {
+  "node.rename": async ({ params, respond, context }) => {
     if (!validateNodeRenameParams(params)) {
       respondInvalidParams({
         respond,
@@ -1150,6 +1226,7 @@ export const nodeHandlers: GatewayRequestHandlers = {
         respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown nodeId"));
         return;
       }
+      context.nodeRegistry.rename(updated.nodeId, updated.displayName ?? trimmed);
       respond(true, { nodeId: updated.nodeId, displayName: updated.displayName }, undefined);
     });
   },
@@ -1190,6 +1267,9 @@ export const nodeHandlers: GatewayRequestHandlers = {
     const id = normalizeOptionalString(nodeId) ?? "";
     if (!id) {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "nodeId required"));
+      return;
+    }
+    if (rejectAgentNodeTarget(client, id, respond)) {
       return;
     }
     await respondUnavailableOnThrow(respond, async () => {
@@ -1315,6 +1395,11 @@ export const nodeHandlers: GatewayRequestHandlers = {
         undefined,
         errorShape(ErrorCodes.INVALID_REQUEST, "nodeId and command required"),
       );
+      return;
+    }
+    // Enforce the signed turn-origin scope before wake, policy hooks, or raw dispatch. A
+    // node-originated admin turn is still confined to its own socket.
+    if (rejectAgentNodeTarget(client, nodeId, respond)) {
       return;
     }
     if (command === "system.execApprovals.get" || command === "system.execApprovals.set") {

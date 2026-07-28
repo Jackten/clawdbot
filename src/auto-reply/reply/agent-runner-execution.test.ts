@@ -276,6 +276,7 @@ vi.mock("./agent-runner-utils.js", () => ({
       authProfileIdSource?: "auto" | "user";
       agentAccountId?: string;
       chatType?: string;
+      requesterNodeId?: string;
     };
     replyRoute?: {
       originatingChannel?: string;
@@ -303,6 +304,7 @@ vi.mock("./agent-runner-utils.js", () => ({
       authProfileId: params.provider === params.run.provider ? params.run.authProfileId : undefined,
       authProfileIdSource:
         params.provider === params.run.provider ? params.run.authProfileIdSource : undefined,
+      requesterNodeId: params.run.requesterNodeId,
     },
   }),
   resolveQueuedReplyRuntimeConfig: <T>(config: T) => config,
@@ -1729,6 +1731,7 @@ describe("runAgentTurnWithFallback", () => {
     const followupRun = createFollowupRun();
     followupRun.run.provider = "codex-cli";
     followupRun.run.model = "gpt-5.4";
+    followupRun.run.requesterNodeId = "qa-node-5554";
     const typingSignals = createMockTypingSignaler();
 
     const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
@@ -1744,6 +1747,7 @@ describe("runAgentTurnWithFallback", () => {
     expectMockCallArgFields(state.runCliAgentMock, 0, "CLI run params", {
       provider: "codex-cli",
       model: "gpt-5.4",
+      requesterNodeId: "qa-node-5554",
     });
   });
 

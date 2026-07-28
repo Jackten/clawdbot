@@ -10,12 +10,16 @@ export type AgentRuntimeIdentity = {
   kind: "agentRuntime";
   agentId: string;
   sessionKey: string;
+  allowedNodeId?: string;
+  senderIsOwner?: boolean;
 };
 
 type AgentRuntimeIdentityTokenPayload = {
   kind: typeof AGENT_RUNTIME_IDENTITY_TOKEN_KIND;
   agentId: string;
   sessionKey: string;
+  allowedNodeId?: string;
+  senderIsOwner?: boolean;
 };
 
 function readSharedAgentRuntimeIdentitySecret(): string | null {
@@ -60,6 +64,8 @@ function decodePayload(value: string): AgentRuntimeIdentityTokenPayload | undefi
       kind?: unknown;
       agentId?: unknown;
       sessionKey?: unknown;
+      allowedNodeId?: unknown;
+      senderIsOwner?: unknown;
     };
     if (
       raw.kind !== AGENT_RUNTIME_IDENTITY_TOKEN_KIND ||
@@ -73,7 +79,23 @@ function decodePayload(value: string): AgentRuntimeIdentityTokenPayload | undefi
     if (!agentId || !sessionKey) {
       return undefined;
     }
-    return { kind: AGENT_RUNTIME_IDENTITY_TOKEN_KIND, agentId, sessionKey };
+    if (raw.allowedNodeId !== undefined && typeof raw.allowedNodeId !== "string") {
+      return undefined;
+    }
+    if (raw.senderIsOwner !== undefined && typeof raw.senderIsOwner !== "boolean") {
+      return undefined;
+    }
+    const allowedNodeId = raw.allowedNodeId?.trim();
+    if (raw.allowedNodeId !== undefined && !allowedNodeId) {
+      return undefined;
+    }
+    return {
+      kind: AGENT_RUNTIME_IDENTITY_TOKEN_KIND,
+      agentId,
+      sessionKey,
+      ...(allowedNodeId ? { allowedNodeId } : {}),
+      ...(raw.senderIsOwner !== undefined ? { senderIsOwner: raw.senderIsOwner } : {}),
+    };
   } catch {
     return undefined;
   }
@@ -83,11 +105,15 @@ function decodePayload(value: string): AgentRuntimeIdentityTokenPayload | undefi
 export function mintAgentRuntimeIdentityToken(params: {
   agentId: string;
   sessionKey: string;
+  allowedNodeId?: string;
+  senderIsOwner?: boolean;
 }): string {
   const payload = encodePayload({
     kind: AGENT_RUNTIME_IDENTITY_TOKEN_KIND,
     agentId: normalizeAgentId(params.agentId),
     sessionKey: params.sessionKey.trim(),
+    ...(params.allowedNodeId?.trim() ? { allowedNodeId: params.allowedNodeId.trim() } : {}),
+    ...(params.senderIsOwner !== undefined ? { senderIsOwner: params.senderIsOwner === true } : {}),
   });
   const signature = signPayload(requireSharedAgentRuntimeIdentitySecret(), payload);
   return `${payload}.${signature}`;
@@ -117,5 +143,7 @@ export function verifyAgentRuntimeIdentityToken(
     kind: "agentRuntime",
     agentId: payload.agentId,
     sessionKey: payload.sessionKey,
+    ...(payload.allowedNodeId ? { allowedNodeId: payload.allowedNodeId } : {}),
+    ...(payload.senderIsOwner !== undefined ? { senderIsOwner: payload.senderIsOwner } : {}),
   };
 }

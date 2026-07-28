@@ -2915,6 +2915,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
       }));
       const ensureMcpLoopbackServer = vi.fn(createTestMcpLoopbackServer);
       const createMcpLoopbackServerConfig = vi.fn(createTestMcpLoopbackServerConfig);
+      const resolveMcpLoopbackBearerToken = vi.fn(() => "scoped-loopback-token");
       const resolveMcpLoopbackScopedTools = vi.fn(() => ({
         agentId: "main",
         tools: [
@@ -2931,6 +2932,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         getActiveMcpLoopbackRuntime,
         ensureMcpLoopbackServer,
         createMcpLoopbackServerConfig,
+        resolveMcpLoopbackBearerToken,
         resolveMcpLoopbackScopedTools,
       });
       cliBackendsTesting.setDepsForTest({
@@ -2969,9 +2971,11 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         currentInboundAudio: true,
         sourceReplyDeliveryMode: "message_tool_only",
         requireExplicitMessageTarget: true,
+        requesterNodeId: "qa-node-5554",
       });
 
       expect(context.preparedBackend.env).toMatchObject({
+        OPENCLAW_MCP_TOKEN: "scoped-loopback-token",
         OPENCLAW_MCP_SESSION_ID: "session-test",
         OPENCLAW_MCP_MESSAGE_CHANNEL: "telegram",
         OPENCLAW_MCP_CURRENT_CHANNEL_ID: "telegram:-100123:topic:42",
@@ -2983,6 +2987,14 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         OPENCLAW_MCP_REQUIRE_EXPLICIT_MESSAGE_TARGET: "true",
         OPENCLAW_MCP_CLI_CAPTURE_KEY: "",
       });
+      expect(resolveMcpLoopbackBearerToken).toHaveBeenCalledWith(
+        expect.objectContaining({ port: 31783 }),
+        false,
+        {
+          sessionKey: "agent:main:telegram:group:chat123",
+          requesterNodeId: "qa-node-5554",
+        },
+      );
       expect(context.mcpDeliveryCapture).toBe(true);
       expect(resolveMcpLoopbackScopedTools).toHaveBeenCalledWith(
         expect.objectContaining({

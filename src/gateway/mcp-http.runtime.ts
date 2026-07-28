@@ -41,6 +41,7 @@ type McpLoopbackScopeParams = {
   sourceReplyDeliveryMode: SourceReplyDeliveryMode | undefined;
   requireExplicitMessageTarget?: boolean;
   senderIsOwner: boolean | undefined;
+  requesterNodeId?: string;
 };
 
 /** Resolves loopback-visible tools after applying gateway scope and native-tool exclusions. */
@@ -82,6 +83,7 @@ export class McpLoopbackToolCache {
         : params.senderIsOwner === false
           ? "non-owner"
           : "unknown-owner",
+      params.requesterNodeId ?? "",
     ].join("\u0000");
     const now = Date.now();
     for (const [key, entry] of this.#entries) {

@@ -158,6 +158,7 @@ export function resolveFollowupAuthorizationKey(run: FollowupRun["run"]): string
     run.bashElevated?.allowed === true,
     run.bashElevated?.defaultLevel ?? "",
     run.approvalReviewerDeviceId ?? "",
+    run.requesterNodeId ?? "",
   ]);
 }
 

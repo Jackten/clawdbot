@@ -2555,6 +2555,7 @@ async function runAgentTurnWithFallbackInternal(
                     agentAccountId: params.followupRun.run.agentAccountId,
                     senderIsOwner: params.followupRun.run.senderIsOwner,
                     approvalReviewerDeviceId: params.followupRun.run.approvalReviewerDeviceId,
+                    requesterNodeId: params.followupRun.run.requesterNodeId,
                     toolsAllow: params.opts?.toolsAllow,
                     disableTools: params.opts?.disableTools,
                     abortSignal: runAbortSignal,

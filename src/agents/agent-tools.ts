@@ -414,6 +414,8 @@ export function createOpenClawCodingTools(options?: {
   runId?: string;
   /** Device-scoped operator session allowed to review approvals initiated by this run. */
   approvalReviewerDeviceId?: string;
+  /** Authenticated node connection that originated this run. */
+  requesterNodeId?: string;
   /** Diagnostic trace context for hook/log correlation during this run. */
   trace?: DiagnosticTraceContext;
   /** What initiated this run (for trigger-specific tool restrictions). */
@@ -885,8 +887,14 @@ export function createOpenClawCodingTools(options?: {
           workspaceOnly: applyPatchWorkspaceOnly,
         });
   options?.recordToolPrepStage?.("shell-tools");
+  // A node-origin turn may use only the nodes tool; its signed requesterNodeId is
+  // enforced again by the gateway before list/describe/invoke can reach a node.
   const ownerOnlyCoreToolDenylist =
-    options?.senderIsOwner === false ? [...GATEWAY_OWNER_ONLY_CORE_TOOLS] : [];
+    options?.senderIsOwner === false
+      ? GATEWAY_OWNER_ONLY_CORE_TOOLS.filter(
+          (toolName) => toolName !== "nodes" || !options.requesterNodeId?.trim(),
+        )
+      : [];
   const ownerOnlyCoreToolPolicy =
     ownerOnlyCoreToolDenylist.length > 0 ? { deny: ownerOnlyCoreToolDenylist } : undefined;
   const pluginToolAllowlist = capabilityProfile.policy.explicitToolAllowlist;
@@ -1038,6 +1046,7 @@ export function createOpenClawCodingTools(options?: {
           requesterAgentIdOverride: agentId,
           requesterSenderId: options?.senderId,
           senderIsOwner: options?.senderIsOwner,
+          requesterNodeId: options?.requesterNodeId,
           authProfileStore: options?.authProfileStore,
           sessionId: options?.sessionId,
           oneShotCliRun: options?.oneShotCliRun,

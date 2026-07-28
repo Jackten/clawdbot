@@ -1,9 +1,92 @@
 // Process-local MCP loopback runtime state for owner/non-owner HTTP access.
+import { createHmac, timingSafeEqual } from "node:crypto";
+
 type McpLoopbackRuntime = {
   port: number;
   ownerToken: string;
   nonOwnerToken: string;
 };
+
+const MCP_NODE_SCOPE_TOKEN_PREFIX = "mcp-node-scope-v1";
+
+type McpLoopbackNodeScope = {
+  senderIsOwner: boolean;
+  sessionKey: string;
+  requesterNodeId: string;
+};
+
+function signMcpNodeScopeToken(secret: string, role: string, payload: string): string {
+  return createHmac("sha256", secret)
+    .update(MCP_NODE_SCOPE_TOKEN_PREFIX)
+    .update("\0")
+    .update(role)
+    .update("\0")
+    .update(payload)
+    .digest("base64url");
+}
+
+function signaturesMatch(value: string, expected: string): boolean {
+  const valueBytes = Buffer.from(value);
+  const expectedBytes = Buffer.from(expected);
+  return valueBytes.length === expectedBytes.length && timingSafeEqual(valueBytes, expectedBytes);
+}
+
+function mintMcpLoopbackNodeScopeToken(
+  runtime: McpLoopbackRuntime,
+  scope: McpLoopbackNodeScope,
+): string {
+  const role = scope.senderIsOwner ? "owner" : "non-owner";
+  const secret = scope.senderIsOwner ? runtime.ownerToken : runtime.nonOwnerToken;
+  const payload = Buffer.from(
+    JSON.stringify({
+      sessionKey: scope.sessionKey.trim(),
+      requesterNodeId: scope.requesterNodeId.trim(),
+    }),
+    "utf8",
+  ).toString("base64url");
+  const signature = signMcpNodeScopeToken(secret, role, payload);
+  return `${MCP_NODE_SCOPE_TOKEN_PREFIX}.${role}.${payload}.${signature}`;
+}
+
+/** Verify a process-scoped MCP token that binds one CLI run to one session and node. */
+export function verifyMcpLoopbackNodeScopeToken(
+  token: string,
+  runtime: Pick<McpLoopbackRuntime, "ownerToken" | "nonOwnerToken">,
+): McpLoopbackNodeScope | undefined {
+  const [prefix, role, payload, signature, ...extra] = token.trim().split(".");
+  if (
+    prefix !== MCP_NODE_SCOPE_TOKEN_PREFIX ||
+    (role !== "owner" && role !== "non-owner") ||
+    !payload ||
+    !signature ||
+    extra.length > 0
+  ) {
+    return undefined;
+  }
+  const secret = role === "owner" ? runtime.ownerToken : runtime.nonOwnerToken;
+  if (!signaturesMatch(signature, signMcpNodeScopeToken(secret, role, payload))) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
+      sessionKey?: unknown;
+      requesterNodeId?: unknown;
+    };
+    const sessionKey = typeof parsed.sessionKey === "string" ? parsed.sessionKey.trim() : "";
+    const requesterNodeId =
+      typeof parsed.requesterNodeId === "string" ? parsed.requesterNodeId.trim() : "";
+    if (!sessionKey || !requesterNodeId) {
+      return undefined;
+    }
+    return {
+      senderIsOwner: role === "owner",
+      sessionKey,
+      requesterNodeId,
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 export type McpLoopbackToolCallTerminalOutcome =
   | { outcome: "blocked"; deniedReason: string }
@@ -371,7 +454,15 @@ export function setActiveMcpLoopbackRuntime(runtime: McpLoopbackRuntime): void {
 export function resolveMcpLoopbackBearerToken(
   runtime: McpLoopbackRuntime,
   senderIsOwner: boolean,
+  scope?: { sessionKey?: string; requesterNodeId?: string },
 ): string {
+  if (scope?.sessionKey?.trim() && scope.requesterNodeId?.trim()) {
+    return mintMcpLoopbackNodeScopeToken(runtime, {
+      senderIsOwner,
+      sessionKey: scope.sessionKey,
+      requesterNodeId: scope.requesterNodeId,
+    });
+  }
   return senderIsOwner ? runtime.ownerToken : runtime.nonOwnerToken;
 }
 

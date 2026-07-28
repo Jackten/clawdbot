@@ -252,6 +252,17 @@ export class NodeRegistry {
     return session;
   }
 
+  /** Apply an operator display-name override to the current live catalog row. */
+  rename(nodeId: string, displayName: string): boolean {
+    const session = this.nodesById.get(nodeId);
+    const normalized = displayName.trim();
+    if (!session || !normalized) {
+      return false;
+    }
+    session.displayName = normalized;
+    return true;
+  }
+
   /** Unregister one connection and reject invokes tied to that connection. */
   unregister(connId: string): string | null {
     const nodeId = this.nodesByConn.get(connId);

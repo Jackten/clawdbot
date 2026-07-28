@@ -361,6 +361,55 @@ describe("gateway tool defaults", () => {
     expect(call.agentRuntimeIdentityToken).toEqual(expect.any(String));
   });
 
+  it("marks local node calls from trusted tool context with agent runtime identity", async () => {
+    mocks.callGateway.mockResolvedValueOnce({ ok: true });
+
+    await withGatewayToolCallerIdentity(
+      {
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        allowedNodeId: "qa-node-5554",
+        senderIsOwner: false,
+      },
+      async () => {
+        await callGatewayTool(
+          "node.invoke",
+          {},
+          {
+            nodeId: "qa-node-5554",
+            command: "app.open",
+            idempotencyKey: "qa-open",
+          },
+        );
+      },
+    );
+
+    const call = capturedGatewayCall();
+    expect(call.method).toBe("node.invoke");
+    expect(call.agentRuntimeIdentityToken).toEqual(expect.any(String));
+  });
+
+  it.each(["node.pair.list", "node.pair.approve", "node.pair.reject"])(
+    "marks local %s calls from trusted tool context with agent runtime identity",
+    async (method) => {
+      mocks.callGateway.mockResolvedValueOnce({ ok: true });
+
+      await withGatewayToolCallerIdentity(
+        {
+          agentId: "main",
+          sessionKey: "agent:main:main",
+          allowedNodeId: "qa-node-5554",
+          senderIsOwner: false,
+        },
+        async () => {
+          await callGatewayTool(method, {}, { requestId: "pair-request" });
+        },
+      );
+
+      expect(capturedGatewayCall().agentRuntimeIdentityToken).toEqual(expect.any(String));
+    },
+  );
+
   it("explains stale gateway cron connection metadata rejections", async () => {
     mocks.callGateway.mockRejectedValueOnce(
       new Error(
@@ -376,7 +425,7 @@ describe("gateway tool defaults", () => {
         },
       ),
     ).rejects.toThrow(
-      "The running Gateway is from an older OpenClaw build and rejected current agent cron connection metadata. Restart the Gateway with `openclaw gateway restart`, then retry.",
+      "The running Gateway is from an older OpenClaw build and rejected current agent-scoped connection metadata. Restart the Gateway with `openclaw gateway restart`, then retry.",
     );
 
     const call = capturedGatewayCall();
@@ -398,7 +447,7 @@ describe("gateway tool defaults", () => {
         },
       ),
     ).rejects.toThrow(
-      "The running Gateway is from an older OpenClaw build and rejected current agent cron connection metadata. Restart the Gateway with `openclaw gateway restart`, then retry.",
+      "The running Gateway is from an older OpenClaw build and rejected current agent-scoped connection metadata. Restart the Gateway with `openclaw gateway restart`, then retry.",
     );
 
     const call = capturedGatewayCall();
@@ -426,7 +475,7 @@ describe("gateway tool defaults", () => {
           );
         },
       ),
-    ).rejects.toThrow("agent cron gateway calls require the trusted local gateway context");
+    ).rejects.toThrow("agent-scoped gateway calls require the trusted local gateway context");
     expect(mocks.callGateway).not.toHaveBeenCalled();
   });
 
@@ -438,7 +487,7 @@ describe("gateway tool defaults", () => {
           await callGatewayTool("cron.remove", { gatewayToken: "token" }, { id: "job-1" });
         },
       ),
-    ).rejects.toThrow("agent cron gateway calls require the trusted local gateway context");
+    ).rejects.toThrow("agent-scoped gateway calls require the trusted local gateway context");
     expect(mocks.callGateway).not.toHaveBeenCalled();
   });
 
@@ -460,7 +509,7 @@ describe("gateway tool defaults", () => {
           await callGatewayTool("cron.remove", {}, { id: "job-1" });
         },
       ),
-    ).rejects.toThrow("agent cron gateway calls require the trusted local gateway context");
+    ).rejects.toThrow("agent-scoped gateway calls require the trusted local gateway context");
     expect(mocks.callGateway).not.toHaveBeenCalled();
   });
 

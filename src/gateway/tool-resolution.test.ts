@@ -71,6 +71,35 @@ describe("resolveGatewayScopedTools", () => {
     expect(result.tools.some((tool) => tool.name === "message")).toBe(false);
   });
 
+  it("exposes only node-scoped owner tools to a signed non-owner node turn", () => {
+    const result = resolveGatewayScopedTools({
+      cfg: {} as OpenClawConfig,
+      sessionKey: "agent:main:main",
+      senderIsOwner: false,
+      requesterNodeId: "qa-node-5554",
+      surface: "loopback",
+    });
+    const names = new Set(result.tools.map((tool) => tool.name));
+
+    expect(names.has("nodes")).toBe(true);
+    expect(names.has("cron")).toBe(false);
+    expect(names.has("gateway")).toBe(false);
+  });
+
+  it("does not trust a requester node id on the public HTTP surface", () => {
+    const result = resolveGatewayScopedTools({
+      cfg: {
+        gateway: { tools: { allow: ["nodes"] } },
+      } as OpenClawConfig,
+      sessionKey: "agent:main:main",
+      senderIsOwner: false,
+      requesterNodeId: "qa-node-5554",
+      surface: "http",
+    });
+
+    expect(result.tools.some((tool) => tool.name === "nodes")).toBe(false);
+  });
+
   it("passes loopback yield context into sessions_yield", async () => {
     const onYield = vi.fn();
     const result = resolveGatewayScopedTools({

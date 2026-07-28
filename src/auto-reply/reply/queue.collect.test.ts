@@ -3878,6 +3878,21 @@ describe("resolveFollowupAuthorizationKey", () => {
     );
   });
 
+  it("changes when the authenticated requester node changes", () => {
+    const run = createRun({ prompt: "one" }).run;
+    expect(
+      resolveFollowupAuthorizationKey({
+        ...run,
+        requesterNodeId: "qa-node-5554",
+      }),
+    ).not.toBe(
+      resolveFollowupAuthorizationKey({
+        ...run,
+        requesterNodeId: "owner-phone-node",
+      }),
+    );
+  });
+
   it("does not change when only sender display fields change", () => {
     const run = createRun({ prompt: "one" }).run;
     expect(
