@@ -423,7 +423,11 @@ async function compactNativeHarnessCliTranscript(params: {
           authProfileId,
           contextTokenBudget: params.contextTokenBudget,
           currentTokenCount: params.currentTokenCount,
-          trigger: "budget",
+          // This pre-turn lifecycle is an explicit host request. Codex app-server
+          // accepts native thread compaction only as a manual request; labeling it
+          // "budget" makes the harness defer to auto-compaction and forces the CLI
+          // down the oversized transcript fallback.
+          trigger: "manual",
           force: true,
           messageChannel: params.messageChannel,
           agentAccountId: params.agentAccountId,

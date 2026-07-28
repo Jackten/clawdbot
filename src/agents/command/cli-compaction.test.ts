@@ -447,7 +447,7 @@ describe("runCliTurnCompactionLifecycle", () => {
       contextEngine,
       agentHarnessId: "codex",
       authProfileId: "github-copilot:work",
-      trigger: "budget",
+      trigger: "manual",
       force: true,
     });
     expect(compactAgentHarnessSessionCalls[0]?.[0].contextEngineRuntimeContext).toMatchObject({
