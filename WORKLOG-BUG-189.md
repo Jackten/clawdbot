@@ -2,8 +2,8 @@
 
 ## Outcome
 
-Implemented source-level node containment for agent turns and hardened the QA fleet runner. No live
-gateway restart, fleet run, or emulator run was performed.
+Implemented source-level node containment for agent turns, hardened the QA fleet runner, deployed
+the fix to the live Mac-primary gateway, and proved it with one isolated pinned emulator canary.
 
 ## Root cause
 
@@ -66,10 +66,96 @@ node --check /Users/clawdmac/clawd/bin/qa-fleet.mjs
 autoreview --mode local: clean, no accepted/actionable findings
 ```
 
+## Live deployment and isolated canary
+
+Deployment evidence, 2026-07-28:
+
+```text
+commit=d4a980f20f2
+generation_before=2026-07-28T17-03-48-259Z-77595
+generation_after=2026-07-28T20-50-15-835Z-7455
+build_status=0
+HTTP during build: 491/491 = 200
+gateway PID before restart=6846
+safe restart=OK: gateway restarted, HTTP 200, WhatsApp reconnected
+gateway PID after restart=10004
+final gateway PID after independent auth-repair kickstart=12157
+SM-S938U1 f26d45bc037b… paired=true connected=true
+post-restart ERR_MODULE_NOT_FOUND=0
+```
+
+The build used `pnpm build`, which routed through `scripts/live-safe-build.mjs`. The running gateway
+was never stopped or disturbed by the build. Before restart, the explicit last-three-minute gateway
+log check found no inbound/run start and the session-state check found zero fresh running sessions.
+Restart used only `/Users/clawdmac/clawd/bin/openclaw-safe-restart.sh`.
+
+At 17:03:15, the pre-existing `ai.openclaw.auth-repair` LaunchAgent independently issued its legacy
+raw kickstart after `models.authLogout`. It runs every 900 seconds and was not invoked by this
+deployment. The immutable generation remained unchanged. Launchd recovered on PID 12157; five HTTP
+probes and three node-list probes passed, Jack's phone reconnected, and the Talk proof below was
+repeated on the final process. Migrating that separate auth-repair automation to the safe wrapper is
+left to its supervising lane.
+
+Post-restart Talk proof:
+
+```text
+talk.client.registerExternalSession => {"ok":true}
+2026-07-28T17:04:44.118-04:00 talk gateway tool control_home failed
+```
+
+The tool probe supplied an empty string. The configured executable rejected it at its local usage
+guard before reading a Home Assistant token or contacting Home Assistant; this exercised the
+name-only success/failure logging path without a model/API call or device effect.
+
+Canary:
+
+```text
+serial=emulator-5590
+avd=claw-qa19
+node=513689417b9d…
+displayName=Claw-QA-5590
+app=0.69.0-a70
+```
+
+The worker identity was a signed agent-runtime identity with:
+
+```text
+sessionKey=agent:main:bug-189-isolated-canary
+allowedNodeId=513689417b9d…
+senderIsOwner=false
+```
+
+Evidence:
+
+- `node.list` exposed exactly the bound QA node.
+- `node.describe` exposed the QA node as connected Android
+  `sdk_gphone64_arm64`.
+- `node.invoke(device.info)` on the QA node succeeded and returned Android 15 / SDK 35 and app
+  `0.69.0-a70`, matching the emulator.
+- `node.describe` and `node.invoke(device.info)` against Jack's `f26d45bc037b…` node both failed
+  with `NODE_SCOPE_VIOLATION` / `agent turn is not authorized for this node`.
+- The isolated fleet-worker environment could not query the global node catalog, so the exact
+  binding preflight passed.
+- A globally authenticated negative control produced the runner's exact refusal:
+  `QA containment preflight: agent 1 can query the global node catalog; refusing to start any QA agents`.
+- No model turn, chat, channel send, or phone action was performed.
+
+Cleanup proof:
+
+- Removed canary node pairing.
+- Removed the canary's residual operator device pairing.
+- Stopped `emulator-5590`.
+- Final node registry exactly matched the two-phone protected baseline.
+
+Evidence directory:
+
+```text
+.artifacts/bug-189-deploy-20260728T165015/
+```
+
 ## Operational boundary
 
-The live gateway was deliberately not restarted. It continues running the pre-fix build until a
-separately scheduled safe restart/deployment. Fleet runs remain suspended until that deployment and
-an isolated canary confirm the running gateway has the containment code.
+The containment fix is deployed and canary-proven. The single canary was destroyed; no QA fleet run
+was performed.
 
 OUTCOME: DONE
