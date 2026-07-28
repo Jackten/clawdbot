@@ -95,6 +95,14 @@ export interface AgentFreshnessResults {
   status: string;
 }
 
+export interface AgentJobCheckpoints {
+  checkpoint_key: string;
+  completed_at: number;
+  item_key: string;
+  job_id: string;
+  result_json: string | null;
+}
+
 export interface AgentModelCatalogs {
   agent_dir: string;
   catalog_key: string;
@@ -1184,6 +1192,7 @@ export interface DB {
   agent_external_effect_events: AgentExternalEffectEvents;
   agent_external_effects: AgentExternalEffects;
   agent_freshness_results: AgentFreshnessResults;
+  agent_job_checkpoints: AgentJobCheckpoints;
   agent_model_catalogs: AgentModelCatalogs;
   agent_mutation_locks: AgentMutationLocks;
   android_notification_recent_packages: AndroidNotificationRecentPackages;

@@ -121,6 +121,8 @@ export type ExecToolDetails =
       startedAt: number;
       cwd?: string;
       tail?: string;
+      /** Durable task that will deliver the terminal result without process polling. */
+      taskId?: string;
     }
   | {
       status: "completed" | "failed";

@@ -11,6 +11,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addSandboxShellDynamicToolsIfAvailable,
+  addAsyncExecDynamicToolForChannel,
   buildDynamicTools,
   disableCodexPluginThreadConfig,
   filterCodexDynamicToolsForAllowlist,
@@ -834,6 +835,36 @@ describe("Codex app-server dynamic tool build", () => {
     expect(tools.find((tool) => tool.name === "sandbox_exec")?.description).toContain(
       "Docker container-path bind layout",
     );
+  });
+
+  it("exposes durable async exec only for channel-deliverable turns", async () => {
+    const execTool = createRuntimeDynamicTool("exec");
+    const messageTool = createRuntimeDynamicTool("message");
+    setOpenClawCodingToolsFactoryForTests(() => [execTool, messageTool]);
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const params = createParams(sessionFile, workspaceDir);
+    params.disableTools = false;
+    params.runtimePlan = createCodexRuntimePlanFixture();
+    params.messageProvider = "whatsapp";
+    params.currentChannelId = "user:proof";
+
+    const tools = await buildDynamicToolsForTest(params, workspaceDir);
+
+    expect(tools.map((tool) => tool.name)).toEqual(["message", "async_exec"]);
+    const asyncExec = tools.find((tool) => tool.name === "async_exec");
+    await asyncExec?.execute("call-1", { command: "sleep 5" }, undefined);
+    expect(execTool.execute).toHaveBeenCalledWith("call-1", { command: "sleep 5" }, undefined);
+  });
+
+  it("does not expose durable async exec without a channel delivery route", () => {
+    const execTool = createRuntimeDynamicTool("exec");
+    const input = {
+      params: createParams("/tmp/session.jsonl", "/tmp/workspace"),
+      pluginConfig: {},
+    } as never;
+
+    expect(addAsyncExecDynamicToolForChannel([], [execTool], input)).toEqual([]);
   });
 
   it("does not expose sandbox shell tools when sandbox routing is disabled", async () => {

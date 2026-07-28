@@ -2386,6 +2386,48 @@ describe("task-registry", () => {
     });
   });
 
+  it("keeps an interrupted effect pending and retries reconciliation without fallback", async () => {
+    await withTaskRegistryTempDir(async () => {
+      vi.useFakeTimers();
+      resetTaskRegistryMemoryForTest();
+      const pendingError = Object.assign(new Error("Effect outcome pending"), {
+        name: "AgentExternalEffectUnknownError",
+      });
+      const sendMessage = vi.fn().mockRejectedValueOnce(pendingError).mockResolvedValueOnce({
+        channel: "notifychat",
+        to: "notifychat:123",
+        via: "direct",
+      });
+      setTaskRegistryDeliveryRuntimeForTests({
+        sendMessage,
+        isPendingTaskDeliveryEffect: (error) => error === pendingError,
+      });
+      const task = createTaskRecord({
+        runtime: "cli",
+        taskKind: "exec",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        requesterOrigin: {
+          channel: "notifychat",
+          to: "notifychat:123",
+        },
+        runId: "exec:pending-delivery",
+        task: "Background command",
+        status: "succeeded",
+        deliveryStatus: "pending",
+        terminalSummary: "Done",
+      });
+
+      await maybeDeliverTaskTerminalUpdate(task.taskId);
+      expect(requireTaskByRunId("exec:pending-delivery").deliveryStatus).toBe("pending");
+      expect(peekSystemEvents("agent:main:main")).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect.poll(() => sendMessage.mock.calls.length).toBe(2);
+      expect(requireTaskByRunId("exec:pending-delivery").deliveryStatus).toBe("delivered");
+    });
+  });
+
   it("restores persisted tasks from disk on the next lookup", async () => {
     await withTaskRegistryTempDir(
       async () => {
@@ -2411,6 +2453,41 @@ describe("task-registry", () => {
           runId: "run-restore",
           task: "Restore me",
         });
+      },
+      { durableStore: true },
+    );
+  });
+
+  it("re-drives persisted terminal deliveries that were pending at restart", async () => {
+    await withTaskRegistryTempDir(
+      async () => {
+        resetTaskRegistryForTests();
+        hoisted.sendMessageMock.mockResolvedValue({
+          channel: "notifychat",
+          to: "notifychat:123",
+          via: "direct",
+        });
+        const task = createTaskRecord({
+          runtime: "cli",
+          taskKind: "exec",
+          ownerKey: "agent:main:main",
+          scopeKind: "session",
+          requesterOrigin: {
+            channel: "notifychat",
+            to: "notifychat:123",
+          },
+          runId: "exec:restore-pending",
+          task: "Background command",
+          status: "succeeded",
+          deliveryStatus: "pending",
+          terminalSummary: "Done after restart",
+        });
+
+        resetTaskRegistryForTests({ persist: false });
+        reloadTaskRegistryFromStore();
+
+        await expect.poll(() => hoisted.sendMessageMock.mock.calls.length).toBe(1);
+        expectRecordFields(getTaskById(task.taskId), { deliveryStatus: "delivered" });
       },
       { durableStore: true },
     );

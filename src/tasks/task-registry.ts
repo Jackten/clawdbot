@@ -76,10 +76,12 @@ let listenerStarted = false;
 let listenerStop: (() => void) | null = null;
 let restoreAttempted = false;
 const taskFlowSyncRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-type TaskRegistryDeliveryRuntime = Pick<
-  typeof import("./task-registry-delivery-runtime.js"),
-  "sendMessage"
->;
+type TaskRegistryDeliveryRuntime = {
+  sendTaskMessage?: typeof import("./task-registry-delivery-runtime.js").sendTaskMessage;
+  /** Legacy test/runtime override name; production uses sendTaskMessage. */
+  sendMessage?: typeof import("./task-registry-delivery-runtime.js").sendTaskMessage;
+  isPendingTaskDeliveryEffect?: typeof import("./task-registry-delivery-runtime.js").isPendingTaskDeliveryEffect;
+};
 const TASK_REGISTRY_DELIVERY_RUNTIME_OVERRIDE_KEY = Symbol.for(
   "openclaw.taskRegistry.deliveryRuntimeOverride",
 );
@@ -1216,6 +1218,19 @@ function restoreTaskRegistryOnce() {
       kind: "restored",
       tasks: snapshotTaskRecords(tasks),
     }));
+    for (const task of tasks.values()) {
+      if (
+        task.deliveryStatus === "pending" &&
+        isTerminalTaskStatus(task.status) &&
+        shouldAutoDeliverTaskTerminalUpdate(task)
+      ) {
+        // Persisted terminal rows are the durable retry driver when the prior
+        // process stopped before its in-memory reconciliation timer fired.
+        queueMicrotask(() => {
+          void maybeDeliverTaskTerminalUpdate(task.taskId);
+        });
+      }
+    }
   } catch (error) {
     log.warn("Failed to restore task registry", { error: formatErrorMessage(error) });
   }
@@ -1480,15 +1495,20 @@ export async function maybeDeliverTaskTerminalUpdate(taskId: string): Promise<Ta
         });
       }
     }
+    let deliveryRuntime: TaskRegistryDeliveryRuntime | undefined;
     try {
-      const { sendMessage } = await loadTaskRegistryDeliveryRuntime();
+      deliveryRuntime = await loadTaskRegistryDeliveryRuntime();
       const beforeSend = tasks.get(taskId);
       if (!beforeSend || !shouldAutoDeliverTaskTerminalUpdate(beforeSend)) {
         return beforeSend ? cloneTaskRecord(beforeSend) : null;
       }
       const requesterAgentId = parseAgentSessionKey(ownerSessionKey)?.agentId;
       const idempotencyKey = resolveTaskTerminalIdempotencyKey(latest);
-      await sendMessage({
+      const sendTaskMessage = deliveryRuntime.sendTaskMessage ?? deliveryRuntime.sendMessage;
+      if (!sendTaskMessage) {
+        throw new Error("Task delivery runtime has no task message sender.");
+      }
+      await sendTaskMessage({
         channel: owner.requesterOrigin?.channel,
         to: owner.requesterOrigin?.to ?? "",
         accountId: owner.requesterOrigin?.accountId,
@@ -1500,6 +1520,11 @@ export async function maybeDeliverTaskTerminalUpdate(taskId: string): Promise<Ta
           sessionKey: ownerSessionKey,
           agentId: requesterAgentId,
           idempotencyKey,
+        },
+        mutation: {
+          jobId: latest.taskId,
+          runId: latest.runId ?? latest.taskId,
+          logicalSlot: idempotencyKey,
         },
       });
       const afterSend = tasks.get(taskId);
@@ -1514,6 +1539,15 @@ export async function maybeDeliverTaskTerminalUpdate(taskId: string): Promise<Ta
         lastEventAt: Date.now(),
       });
     } catch (error) {
+      if (deliveryRuntime?.isPendingTaskDeliveryEffect?.(error)) {
+        // Keep the task pending while the durable transport row settles. The
+        // next attempt reconciles the same effect instead of sending a fallback.
+        const retryTimer = setTimeout(() => {
+          void maybeDeliverTaskTerminalUpdate(taskId);
+        }, 5_000);
+        retryTimer.unref?.();
+        return cloneTaskRecord(tasks.get(taskId) ?? latest);
+      }
       log.warn("Failed to deliver background task update", {
         taskId,
         ownerKey: ownerSessionKey,
@@ -1583,14 +1617,18 @@ export async function maybeDeliverTaskStateChangeUpdate(
         lastEventAt: Date.now(),
       });
     }
-    const { sendMessage } = await loadTaskRegistryDeliveryRuntime();
+    const deliveryRuntime = await loadTaskRegistryDeliveryRuntime();
+    const sendTaskMessage = deliveryRuntime.sendTaskMessage ?? deliveryRuntime.sendMessage;
+    if (!sendTaskMessage) {
+      throw new Error("Task delivery runtime has no task message sender.");
+    }
     const requesterAgentId = parseAgentSessionKey(ownerSessionKey)?.agentId;
     const idempotencyKey = resolveTaskStateChangeIdempotencyKey({
       task: current,
       latestEvent,
       owner,
     });
-    await sendMessage({
+    await sendTaskMessage({
       channel: owner.requesterOrigin?.channel,
       to: owner.requesterOrigin?.to ?? "",
       accountId: owner.requesterOrigin?.accountId,
@@ -1602,6 +1640,11 @@ export async function maybeDeliverTaskStateChangeUpdate(
         sessionKey: ownerSessionKey,
         agentId: requesterAgentId,
         idempotencyKey,
+      },
+      mutation: {
+        jobId: current.taskId,
+        runId: current.runId ?? current.taskId,
+        logicalSlot: idempotencyKey,
       },
     });
     upsertTaskDeliveryState({
@@ -2222,7 +2265,7 @@ export async function cancelTaskById(params: {
   try {
     // A direct kill is only a provisional terminal projection. Re-read the
     // owning subagent run before promotion so its canonical completion can win.
-    if (task.runtime === "cli" && task.taskKind === "agent_consult") {
+    if (task.runtime === "cli" && (task.taskKind === "agent_consult" || task.taskKind === "exec")) {
       if (
         !(await cancelActiveCliTaskRun({
           runId: task.runId,
@@ -2232,7 +2275,7 @@ export async function cancelTaskById(params: {
         return {
           found: true,
           cancelled: false,
-          reason: "Agent consult has no active cancellation handle.",
+          reason: "CLI task has no active cancellation handle.",
           task: cloneTaskRecord(task),
         };
       }

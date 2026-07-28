@@ -35,6 +35,7 @@ import {
   deriveSessionChatTypeFromKey,
   type SessionKeyChatType,
 } from "../sessions/session-chat-type-shared.js";
+import { isActiveCliTaskRun } from "./cli-task-cancel.js";
 import { CODEX_NATIVE_SUBAGENT_STALE_ERROR } from "./codex-native-subagent-task.js";
 import {
   getDetachedTaskLifecycleRuntime,
@@ -478,7 +479,10 @@ function hasActiveCliRun(task: TaskRecord): boolean {
   const candidateRunIds = [task.sourceId, task.runId];
   for (const candidate of candidateRunIds) {
     const runId = candidate?.trim();
-    if (runId && taskRegistryMaintenanceRuntime.getAgentRunContext(runId)) {
+    if (
+      runId &&
+      (taskRegistryMaintenanceRuntime.getAgentRunContext(runId) || isActiveCliTaskRun(runId))
+    ) {
       return true;
     }
   }

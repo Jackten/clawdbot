@@ -197,6 +197,18 @@ CREATE TABLE IF NOT EXISTS agent_freshness_results (
 CREATE INDEX IF NOT EXISTS idx_agent_freshness_results_status
   ON agent_freshness_results(status, checked_at);
 
+CREATE TABLE IF NOT EXISTS agent_job_checkpoints (
+  job_id TEXT NOT NULL,
+  checkpoint_key TEXT NOT NULL,
+  item_key TEXT NOT NULL,
+  result_json TEXT,
+  completed_at INTEGER NOT NULL,
+  PRIMARY KEY (job_id, checkpoint_key, item_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_job_checkpoints_job
+  ON agent_job_checkpoints(job_id, checkpoint_key, completed_at);
+
 CREATE TABLE IF NOT EXISTS exec_approvals_config (
   config_key TEXT NOT NULL PRIMARY KEY,
   raw_json TEXT NOT NULL,

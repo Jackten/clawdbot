@@ -24,6 +24,11 @@ export function registerActiveCliTaskRun(params: {
   };
 }
 
+export function isActiveCliTaskRun(runId: string | undefined): boolean {
+  const normalized = runId?.trim();
+  return Boolean(normalized && activeCliTaskRunsByRunId.has(normalized));
+}
+
 export async function cancelActiveCliTaskRun(params: {
   runId: string | undefined;
   reason?: string;

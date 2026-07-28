@@ -1150,6 +1150,20 @@ describe("runCodexAppServerAttempt", () => {
     expect(automaticInstructions).not.toContain("message(action=send)");
   });
 
+  it("directs long channel shell work through durable async exec", () => {
+    const workspaceDir = path.join(tempDir, "workspace");
+    const params = createParams(path.join(tempDir, "session.jsonl"), workspaceDir);
+
+    const instructions = testing.buildDeveloperInstructions(params, {
+      dynamicTools: [createNamedDynamicTool("async_exec")],
+    });
+
+    expect(instructions).toContain("use OpenClaw `async_exec` instead of native `bash`");
+    expect(testing.buildDeveloperInstructions(params, { dynamicTools: [] })).not.toContain(
+      "use OpenClaw `async_exec`",
+    );
+  });
+
   it("includes Codex app-server scoped plugin command guidance in developer instructions", () => {
     registerPluginCommand("demo-plugin", {
       name: "codex_demo",

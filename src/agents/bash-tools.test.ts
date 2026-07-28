@@ -29,6 +29,21 @@ import {
 import { createExecTool, createProcessTool } from "./bash-tools.js";
 import { resolveShellFromPath, sanitizeBinaryOutput } from "./shell-utils.js";
 
+const detachedTaskMocks = vi.hoisted(() => ({
+  createRunningTaskRun: vi.fn(() => ({ taskId: "task-background-exec" })),
+  finalizeTaskRunByRunId: vi.fn(() => []),
+  writeAgentJobCheckpoint: vi.fn(),
+}));
+
+vi.mock("../tasks/detached-task-runtime.js", () => ({
+  createRunningTaskRun: detachedTaskMocks.createRunningTaskRun,
+  finalizeTaskRunByRunId: detachedTaskMocks.finalizeTaskRunByRunId,
+}));
+
+vi.mock("./agent-job-checkpoints.js", () => ({
+  writeAgentJobCheckpoint: detachedTaskMocks.writeAgentJobCheckpoint,
+}));
+
 vi.mock("../infra/channel-summary.js", () => ({
   buildChannelSummary: vi.fn(async () => []),
 }));
@@ -737,6 +752,9 @@ describe("tool descriptions", () => {
 
 beforeEach(() => {
   callIdCounter = 0;
+  detachedTaskMocks.createRunningTaskRun.mockClear();
+  detachedTaskMocks.finalizeTaskRunByRunId.mockClear();
+  detachedTaskMocks.writeAgentJobCheckpoint.mockClear();
   resetProcessRegistryForTests();
   resetSystemEventsForTest();
 });
@@ -855,7 +873,7 @@ describe("exec notifyOnExit", () => {
     expect(formatted).toBeUndefined();
   });
 
-  it("preserves the origin delivery context on background exec completion events", async () => {
+  it("creates a durable task for channel-originated background exec work", async () => {
     const sessionKey = "agent:main:telegram:group:-1003774691294:topic:47";
     const tool = createNotifyOnExitExecTool({
       sessionKey,
@@ -866,15 +884,65 @@ describe("exec notifyOnExit", () => {
 
     const sessionId = await startBackgroundCommand(tool, shellEcho("notify"));
 
-    await waitForNotifyEvent(sessionId, sessionKey);
-    const queuedEvent = peekSystemEventEntries(sessionKey).find((event) =>
-      event.text.includes(sessionId.slice(0, 8)),
+    await expect.poll(() => detachedTaskMocks.finalizeTaskRunByRunId.mock.calls.length).toBe(1);
+    expect(detachedTaskMocks.createRunningTaskRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtime: "cli",
+        taskKind: "exec",
+        sourceId: sessionId,
+        requesterSessionKey: sessionKey,
+        requesterOrigin: {
+          channel: "telegram",
+          to: "telegram:-1003774691294:topic:47",
+          threadId: "47",
+        },
+        notifyPolicy: "done_only",
+      }),
     );
+    expect(detachedTaskMocks.writeAgentJobCheckpoint).toHaveBeenCalledTimes(2);
+    expect(detachedTaskMocks.finalizeTaskRunByRunId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtime: "cli",
+        status: "succeeded",
+        terminalSummary: expect.stringContaining("notify"),
+      }),
+    );
+    expect(peekSystemEventEntries(sessionKey)).toEqual([]);
+  });
 
-    expect(queuedEvent).toBeDefined();
-    expect(queuedEvent?.deliveryContext?.channel).toBe("telegram");
-    expect(queuedEvent?.deliveryContext?.to).toBe("telegram:-1003774691294:topic:47");
-    expect(queuedEvent?.deliveryContext?.threadId).toBe("47");
+  it("respects notifyOnExit suppression for channel-originated background exec work", async () => {
+    const tool = createNotifyOnExitExecTool({
+      notifyOnExit: false,
+      messageProvider: "telegram",
+      currentChannelId: "telegram:-1003774691294:topic:47",
+      currentThreadTs: "47",
+    });
+
+    const sessionId = await startBackgroundCommand(tool, shellEcho("silent"));
+    await expect.poll(() => getFinishedSession(sessionId)?.status).toBe(PROCESS_STATUS_COMPLETED);
+
+    expect(detachedTaskMocks.createRunningTaskRun).not.toHaveBeenCalled();
+    expect(detachedTaskMocks.writeAgentJobCheckpoint).not.toHaveBeenCalled();
+    expect(peekSystemEventEntries(DEFAULT_NOTIFY_SESSION_KEY)).toEqual([]);
+  });
+
+  it("suppresses empty successful durable task delivery when configured", async () => {
+    const tool = createNotifyOnExitExecTool({
+      notifyOnExitEmptySuccess: false,
+      messageProvider: "telegram",
+      currentChannelId: "telegram:-1003774691294:topic:47",
+      currentThreadTs: "47",
+    });
+
+    await runBackgroundCommandToCompletion(tool, COMMAND_NOOP);
+
+    expect(detachedTaskMocks.createRunningTaskRun).toHaveBeenCalledTimes(1);
+    expect(detachedTaskMocks.finalizeTaskRunByRunId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "succeeded",
+        suppressDelivery: true,
+      }),
+    );
   });
 
   it("scopes notifyOnExit heartbeat wake to the exec session key", async () => {

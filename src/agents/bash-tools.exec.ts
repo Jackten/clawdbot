@@ -49,9 +49,12 @@ import {
   resolveAgentIdFromSessionKey,
 } from "../routing/session-key.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
+import { registerActiveCliTaskRun } from "../tasks/cli-task-cancel.js";
+import { createRunningTaskRun, finalizeTaskRunByRunId } from "../tasks/detached-task-runtime.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.js";
 import { safeJsonStringify } from "../utils/safe-json.js";
 import { splitShellArgs } from "../utils/shell-argv.js";
+import { writeAgentJobCheckpoint } from "./agent-job-checkpoints.js";
 import type { HookContext } from "./agent-tools.before-tool-call.js";
 import { stripMalformedXmlArgValueSuffixFromKeys } from "./agent-tools.params.js";
 import { markBackgrounded } from "./bash-process-registry.js";
@@ -1304,9 +1307,11 @@ function resolveNotifyOnExitEmptySuccess(defaults?: ExecToolDefaults): boolean {
 export function createExecTool(
   defaults?: ExecToolDefaults,
 ): AgentToolWithMeta<typeof execSchema, ExecToolDetails> {
+  const implicitBackgroundMs =
+    normalizeChatChannelId(defaults?.messageProvider) === null ? 10_000 : 1_000;
   const defaultBackgroundMs = clampWithDefault(
     defaults?.backgroundMs ?? readEnvInt("OPENCLAW_BASH_YIELD_MS", "PI_BASH_YIELD_MS"),
-    10_000,
+    implicitBackgroundMs,
     10,
     120_000,
   );
@@ -2000,6 +2005,120 @@ export function createExecTool(
       let yielded = false;
       let yieldTimer: NodeJS.Timeout | null = null;
       let registeredAbortSignal: AbortSignal | null = null;
+      const detachedRunId = `exec:${run.session.id}`;
+      let detachedTask: { taskId: string } | null = null;
+      let unregisterDetachedTask: (() => void) | undefined;
+
+      const detachChannelExec = () => {
+        if (
+          detachedTask ||
+          run.session.exited ||
+          !notifyOnExit ||
+          !notifySessionKey ||
+          !notifyDeliveryContext?.channel ||
+          !notifyDeliveryContext.to
+        ) {
+          return detachedTask;
+        }
+        try {
+          const now = Date.now();
+          const task = createRunningTaskRun({
+            runtime: "cli",
+            taskKind: "exec",
+            sourceId: run.session.id,
+            requesterSessionKey: notifySessionKey,
+            ownerKey: notifySessionKey,
+            scopeKind: "session",
+            requesterOrigin: notifyDeliveryContext,
+            agentId,
+            requesterAgentId: agentId,
+            runId: detachedRunId,
+            label: "Background tool work",
+            task: "Complete long-running command work and deliver its result.",
+            notifyPolicy: "done_only",
+            deliveryStatus: "pending",
+            startedAt: run.startedAt,
+            lastEventAt: now,
+            progressSummary: "Command is running in the background.",
+          });
+          if (!task) {
+            return null;
+          }
+          detachedTask = { taskId: task.taskId };
+          unregisterDetachedTask = registerActiveCliTaskRun({
+            runId: detachedRunId,
+            cancel: () => {
+              if (run.session.exited) {
+                return false;
+              }
+              run.kill();
+              return true;
+            },
+          });
+          // The durable task owns terminal delivery; the legacy heartbeat path
+          // would otherwise announce the same process completion a second time.
+          run.session.notifyOnExit = false;
+          writeAgentJobCheckpoint({
+            jobId: task.taskId,
+            checkpointKey: "exec.background",
+            itemKey: run.session.id,
+            result: { status: "running", runId: detachedRunId },
+            completedAt: now,
+          });
+          return detachedTask;
+        } catch (error) {
+          logInfo(`exec: failed to create durable background task: ${String(error)}`);
+          return null;
+        }
+      };
+
+      const finalizeDetachedExec = (outcome: ExecProcessOutcome) => {
+        if (!detachedTask) {
+          return;
+        }
+        const endedAt = Date.now();
+        const completed = outcome.status === "completed";
+        const suppressEmptySuccess =
+          completed && outcome.aggregated.trim().length === 0 && !notifyOnExitEmptySuccess;
+        const terminalSummary = truncateMiddle(
+          completed
+            ? renderExecOutputText(outcome.aggregated).trim() || "Background command completed."
+            : outcome.reason,
+          6_000,
+        );
+        try {
+          writeAgentJobCheckpoint({
+            jobId: detachedTask.taskId,
+            checkpointKey: "exec.background",
+            itemKey: run.session.id,
+            result: {
+              status: completed ? "succeeded" : outcome.timedOut ? "timed_out" : "failed",
+              runId: detachedRunId,
+              exitCode: outcome.exitCode,
+            },
+            completedAt: endedAt,
+          });
+        } catch (error) {
+          logInfo(`exec: failed to write terminal background checkpoint: ${String(error)}`);
+        }
+        try {
+          finalizeTaskRunByRunId({
+            runId: detachedRunId,
+            runtime: "cli",
+            sessionKey: notifySessionKey,
+            status: completed ? "succeeded" : outcome.timedOut ? "timed_out" : "failed",
+            endedAt,
+            lastEventAt: endedAt,
+            error: completed ? undefined : outcome.reason,
+            progressSummary: null,
+            terminalSummary,
+            suppressDelivery: suppressEmptySuccess,
+          });
+        } finally {
+          unregisterDetachedTask?.();
+          unregisterDetachedTask = undefined;
+        }
+      };
 
       // Tool-call abort should not kill backgrounded sessions; timeouts still must.
       const onAbortSignal = () => {
@@ -2038,13 +2157,16 @@ export function createExecTool(
       return new Promise<AgentToolResult<ExecToolDetails>>((resolve, reject) => {
         const resolveRunning = () => {
           cleanupToolRunListeners();
+          const task = detachChannelExec();
           resolve({
             content: [
               {
                 type: "text",
-                text: `${getWarningText()}Command still running (session ${run.session.id}, pid ${
-                  run.session.pid ?? "n/a"
-                }). Use process (list/poll/log/write/send-keys/submit/paste/kill/clear/remove) for follow-up.`,
+                text: task
+                  ? `${getWarningText()}Background task ${task.taskId} started. You can continue the conversation; its result will be delivered automatically when it finishes.`
+                  : `${getWarningText()}Command still running (session ${run.session.id}, pid ${
+                      run.session.pid ?? "n/a"
+                    }). Use process (list/poll/log/write/send-keys/submit/paste/kill/clear/remove) for follow-up.`,
               },
             ],
             details: {
@@ -2054,6 +2176,7 @@ export function createExecTool(
               startedAt: run.startedAt,
               cwd: run.session.cwd,
               tail: run.session.tail,
+              taskId: task?.taskId,
             },
           });
         };
@@ -2085,6 +2208,7 @@ export function createExecTool(
         run.promise
           .then((outcome) => {
             cleanupToolRunListeners();
+            finalizeDetachedExec(outcome);
             if (yielded || run.session.backgrounded) {
               return;
             }

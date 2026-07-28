@@ -57,6 +57,7 @@ const CODEX_NATIVE_SANDBOX_TOOL_REQUIREMENTS = [
   "apply_patch",
 ] as const;
 const CODEX_MEMORY_FLUSH_DYNAMIC_TOOL_ALLOW = new Set(["read", "write"]);
+const CODEX_ASYNC_EXEC_DYNAMIC_TOOL_NAME = "async_exec";
 const CODEX_NODE_EXEC_DYNAMIC_TOOL_NAME = "node_exec";
 const CODEX_NODE_PROCESS_DYNAMIC_TOOL_NAME = "node_process";
 const CODEX_NODE_EXEC_HIDDEN_PARAMETER_NAMES = new Set(["host", "security", "ask", "node"]);
@@ -331,10 +332,14 @@ export async function buildDynamicTools(input: DynamicToolBuildParams) {
   });
   const readableAllTools = [...readableAllToolProjection.tools];
   const codexFilteredTools = addNodeShellDynamicToolsIfNeeded(
-    addSandboxShellDynamicToolsIfAvailable(
-      isCodexMemoryFlushRun(params)
-        ? filterCodexMemoryFlushDynamicTools(readableAllTools)
-        : filterCodexDynamicTools(readableAllTools, input.pluginConfig),
+    addAsyncExecDynamicToolForChannel(
+      addSandboxShellDynamicToolsIfAvailable(
+        isCodexMemoryFlushRun(params)
+          ? filterCodexMemoryFlushDynamicTools(readableAllTools)
+          : filterCodexDynamicTools(readableAllTools, input.pluginConfig),
+        readableAllTools,
+        input,
+      ),
       readableAllTools,
       input,
     ),
@@ -723,6 +728,35 @@ export function addSandboxShellDynamicToolsIfAvailable(
       "Manage sandbox_exec sessions that were started through OpenClaw's configured sandbox backend for this session: list, poll, log, write, send-keys, submit, paste, kill, clear, or remove. Use only for sandbox_exec follow-up; use Codex's native shell session handling only when no OpenClaw sandbox is active and native Code Mode is available.",
   };
   return [...filteredTools, sandboxExecTool, sandboxProcessTool];
+}
+
+/** Adds a channel-aware exec path that can detach into durable task delivery. */
+export function addAsyncExecDynamicToolForChannel(
+  filteredTools: OpenClawDynamicTool[],
+  allTools: OpenClawDynamicTool[],
+  input: DynamicToolBuildParams,
+): OpenClawDynamicTool[] {
+  if (
+    isCodexMemoryFlushRun(input.params) ||
+    !resolveCodexMessageToolProvider(input.params)?.trim() ||
+    !input.params.currentChannelId?.trim() ||
+    isCodexDynamicToolExcluded(input.pluginConfig, ["exec", CODEX_ASYNC_EXEC_DYNAMIC_TOOL_NAME])
+  ) {
+    return filteredTools;
+  }
+  const execTool = allTools.find((tool) => normalizeCodexDynamicToolName(tool.name) === "exec");
+  if (!execTool) {
+    return filteredTools;
+  }
+  return [
+    ...filteredTools,
+    {
+      ...execTool,
+      name: CODEX_ASYNC_EXEC_DYNAMIC_TOOL_NAME,
+      description:
+        "Run shell work through OpenClaw's durable channel task path. Commands still running after one second return an immediate task acknowledgement, release the conversation, and automatically deliver their terminal result to the current source conversation. Prefer this over native bash for source-conversation work that may take longer than one second.",
+    },
+  ];
 }
 
 function shouldExposeSandboxExecDynamicTool(input: DynamicToolBuildParams): boolean {

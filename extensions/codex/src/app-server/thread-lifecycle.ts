@@ -1890,11 +1890,24 @@ export function buildDeveloperInstructions(
     // models (codex-rs spec_plan add_collaboration_tools). Without this hint
     // models cannot see spawn_agent and grab the always-direct sessions_spawn.
     "Use Codex native `spawn_agent` for Codex subagents. `spawn_agent` and the other native collaboration tools may be deferred: when `spawn_agent` is not directly listed, load it with `tool_search` before spawning. Use OpenClaw `sessions_spawn` only for OpenClaw or ACP delegation, never as a substitute for `spawn_agent`.",
+    buildAsyncExecInstruction(options.dynamicTools),
     buildVisibleReplyInstruction(params, options.dynamicTools),
     nativeCommandGuidance,
     params.extraSystemPrompt,
   ];
   return sections.filter((section) => typeof section === "string" && section.trim()).join("\n\n");
+}
+
+function buildAsyncExecInstruction(
+  dynamicTools: readonly CodexDynamicToolSpec[] | undefined,
+): string | undefined {
+  const asyncExecAvailable = flattenCodexDynamicToolFunctions(dynamicTools).some(
+    (tool) => tool.name.trim() === "async_exec",
+  );
+  if (!asyncExecAvailable) {
+    return undefined;
+  }
+  return "For shell work in the active source conversation that may take longer than one second, use OpenClaw `async_exec` instead of native `bash`. It acknowledges immediately and delivers the terminal result automatically, so the user can continue the conversation.";
 }
 
 function buildDeferredDynamicToolManifest(
