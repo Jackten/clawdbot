@@ -1,7 +1,7 @@
 # Multitasking Ship-Blocker Fixes
 
-Date: 2026-07-27  
-Scope: independent `SHIP WITH FIXES` findings H1-H4 plus the three flagged follow-ups.  
+Date: 2026-07-27
+Scope: independent `SHIP WITH FIXES` findings H1-H4 plus the three flagged follow-ups.
 Safety: no build and no gateway restart were run.
 
 > **Round 2 correction:** This worklog previously made two false claims. The

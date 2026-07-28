@@ -10,6 +10,7 @@ import * as sessionStore from "../config/sessions.js";
 import { resolveChannelAllowFromPath } from "../pairing/pairing-store.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
+  OPENCLAW_STATE_SCHEMA_VERSION,
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
@@ -1804,7 +1805,7 @@ describe("state migrations", () => {
     await fs.mkdir(path.dirname(stateDbPath), { recursive: true });
     const db = new DatabaseSync(stateDbPath);
     try {
-      db.exec("PRAGMA user_version = 2;");
+      db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1};`);
     } finally {
       db.close();
     }

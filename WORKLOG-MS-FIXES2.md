@@ -1,7 +1,7 @@
 # Multitasking Round 2 Blocker Fixes
 
-Date: 2026-07-27  
-Repo: `/Users/clawdmac/src/openclaw-live`  
+Date: 2026-07-27
+Repo: `/Users/clawdmac/src/openclaw-live`
 Safety: no build and no gateway restart were run.
 
 ## B1 — prompt-derived food/purchase gate

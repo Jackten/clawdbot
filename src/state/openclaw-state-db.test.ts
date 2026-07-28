@@ -18,6 +18,7 @@ import { loadTaskRegistryStateFromSqlite } from "../tasks/task-registry.store.sq
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import type { DB as OpenClawStateKyselyDatabase } from "./openclaw-state-db.generated.js";
 import {
+  OPENCLAW_STATE_SCHEMA_VERSION,
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
@@ -805,7 +806,7 @@ describe("openclaw state database", () => {
     expect(readSqliteNumberPragma(database.db, "busy_timeout")).toBe(30_000);
     expect(readSqliteNumberPragma(database.db, "foreign_keys")).toBe(1);
     expect(readSqliteNumberPragma(database.db, "synchronous")).toBe(1);
-    expect(readSqliteNumberPragma(database.db, "user_version")).toBe(1);
+    expect(readSqliteNumberPragma(database.db, "user_version")).toBe(OPENCLAW_STATE_SCHEMA_VERSION);
     expect(readSqliteNumberPragma(database.db, "wal_autocheckpoint")).toBe(1000);
     const journalMode = database.db.prepare("PRAGMA journal_mode").get() as
       | { journal_mode?: string }
@@ -840,7 +841,7 @@ describe("openclaw state database", () => {
         database.db,
         stateDb.selectFrom("schema_meta").select(["role", "schema_version"]),
       ),
-    ).toEqual({ role: "global", schema_version: 1 });
+    ).toEqual({ role: "global", schema_version: OPENCLAW_STATE_SCHEMA_VERSION });
   });
 
   it("refuses to open newer global schema versions", () => {
@@ -849,14 +850,15 @@ describe("openclaw state database", () => {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
     const { DatabaseSync } = requireNodeSqlite();
     const db = new DatabaseSync(databasePath);
-    db.exec("PRAGMA user_version = 2;");
+    const futureSchemaVersion = OPENCLAW_STATE_SCHEMA_VERSION + 1;
+    db.exec(`PRAGMA user_version = ${futureSchemaVersion};`);
     db.close();
 
     expect(() =>
       openOpenClawStateDatabase({
         env: { OPENCLAW_STATE_DIR: stateDir },
       }),
-    ).toThrow(/newer schema version 2/);
+    ).toThrow(`newer schema version ${futureSchemaVersion}`);
   });
 
   it("does not chmod shared parent directories for explicit database paths", () => {
@@ -887,7 +889,7 @@ describe("openclaw state database", () => {
     expect(first.db.isOpen).toBe(true);
     expect(second.db.isOpen).toBe(true);
     expect(openOpenClawStateDatabase({ path: firstPath })).toBe(first);
-    expect(readSqliteNumberPragma(first.db, "user_version")).toBe(1);
+    expect(readSqliteNumberPragma(first.db, "user_version")).toBe(OPENCLAW_STATE_SCHEMA_VERSION);
   });
 
   it("keys explicit relative paths by resolved database pathname", () => {
