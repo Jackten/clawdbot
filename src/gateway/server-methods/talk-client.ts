@@ -10,9 +10,11 @@ import {
   errorShape,
   formatValidationErrors,
   validateTalkClientCreateParams,
+  validateTalkClientRegisterExternalSessionParams,
   validateTalkClientSteerParams,
   validateTalkClientToolCallParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { logInfo } from "../../logger.js";
 import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../talk/agent-consult-tool.js";
 import { controlRealtimeVoiceAgentRun } from "../../talk/agent-run-control.js";
 import { resolveConfiguredRealtimeVoiceProvider } from "../../talk/provider-resolver.js";
@@ -46,6 +48,41 @@ import type { GatewayRequestHandlers } from "./types.js";
  * calls back into OpenClaw agent consult runs.
  */
 export const talkClientHandlers: GatewayRequestHandlers = {
+  "talk.client.registerExternalSession": async ({ params, respond, client }) => {
+    if (!validateTalkClientRegisterExternalSessionParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid talk.client.registerExternalSession params: ${formatValidationErrors(
+            validateTalkClientRegisterExternalSessionParams.errors,
+          )}`,
+        ),
+      );
+      return;
+    }
+    const deviceId = normalizeOptionalString(client?.connect?.device?.id);
+    if (!deviceId) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.NOT_PAIRED,
+          "talk.client.registerExternalSession requires an authenticated paired device",
+        ),
+      );
+      return;
+    }
+    // The gateway authentication layer verifies this device identity and operator.write scope
+    // before dispatch. Persisting that identity keeps ownership stable across reconnect/restart.
+    rememberTalkClientSession({
+      connId: client?.connId,
+      deviceId,
+      sessionKey: params.sessionKey,
+    });
+    respond(true, { ok: true }, undefined);
+  },
   "talk.client.create": async ({ params, respond, context, client }) => {
     if (!validateTalkClientCreateParams(params)) {
       respond(
@@ -265,8 +302,13 @@ export const talkClientHandlers: GatewayRequestHandlers = {
           timeout: GATEWAY_TOOL_TIMEOUT_MS,
           windowsHide: true,
         });
+        // Log the tool NAME on both paths. The ws layer records only the RPC method, so a broken
+        // voice tool looked identical to a healthy one in the log and this stayed invisible for
+        // days. Never log the argument — it carries user speech content.
+        logInfo(`talk gateway tool ${gatewayTool.name} ok`);
         respond(true, { result: { response: execution.stdout.trim() || "Done." } });
       } catch (error) {
+        logInfo(`talk gateway tool ${gatewayTool.name} failed`);
         respond(true, { result: { error: formatGatewayToolExecutionError(error) } });
       }
       return;
