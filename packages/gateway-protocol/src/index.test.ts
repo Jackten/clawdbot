@@ -23,8 +23,10 @@ import {
   validateTalkClientCreateParams,
   validateTalkClientSteerParams,
   validateTalkClientToolCallParams,
+  validateTalkClientToolCallResult,
   validateTalkAgentControlResult,
   validateTalkSessionAppendAudioParams,
+  validateTalkSessionAttachImageParams,
   validateTalkSessionCancelOutputParams,
   validateTalkSessionCancelTurnParams,
   validateTalkSessionCreateParams,
@@ -328,6 +330,7 @@ describe("validateTalkConfigResult", () => {
               reasoningEffort: "low",
               brain: "agent-consult",
               consultRouting: "force-agent-consult",
+              allowImageInput: true,
               clientTools: [
                 {
                   name: "phone_vibrate",
@@ -356,6 +359,24 @@ describe("validateTalkConfigResult", () => {
         },
       }),
     ).toBe(true);
+  });
+
+  it("validates bounded realtime JPEG attachment params", () => {
+    expect(
+      validateTalkSessionAttachImageParams({
+        sessionId: "relay-1",
+        imageBase64: "aGVsbG8=",
+        mimeType: "image/jpeg",
+        note: "[live video frame]",
+      }),
+    ).toBe(true);
+    expect(
+      validateTalkSessionAttachImageParams({
+        sessionId: "relay-1",
+        imageBase64: "aGVsbG8=",
+        mimeType: "image/png",
+      }),
+    ).toBe(false);
   });
 });
 
@@ -602,6 +623,31 @@ describe("validateTalkClientToolCallParams", () => {
       }),
     ).toBe(true);
   });
+
+  it("accepts a durable running receipt", () => {
+    expect(
+      validateTalkClientToolCallResult({
+        runId: "run-1",
+        idempotencyKey: "talk-call-1",
+        sessionKey: "agent:main:talk-job:one",
+        receipt: {
+          text: "That work is still running.",
+          status: "accepted",
+          jobId: "task-1",
+          runId: "run-1",
+          title: "Finish the account audit",
+          state: "running",
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    { result: { response: "Lights are on." } },
+    { result: { error: "Gateway tool execution failed." } },
+  ])("accepts a synchronous gateway-tool result", (result) => {
+    expect(validateTalkClientToolCallResult(result)).toBe(true);
+  });
 });
 
 describe("validateTalkAgentControlParams", () => {
@@ -611,6 +657,7 @@ describe("validateTalkAgentControlParams", () => {
         sessionKey: "agent:main:main",
         text: "use the safer path",
         mode: "steer",
+        jobId: "task-1",
       }),
     ).toBe(true);
     expect(
@@ -629,6 +676,8 @@ describe("validateTalkAgentControlParams", () => {
         sessionId: "session-1",
         active: true,
         aborted: true,
+        target: "task",
+        jobId: "task-1",
         message: "Cancelled the active OpenClaw run.",
         speak: true,
         show: true,

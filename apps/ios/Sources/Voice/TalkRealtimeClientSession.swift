@@ -27,6 +27,28 @@ struct TalkRealtimeClientSession: Decodable {
 struct TalkRealtimeToolCallResponse: Decodable {
     let runId: String?
     let idempotencyKey: String?
+    let sessionKey: String?
+    let receipt: TalkRealtimeJobReceipt?
+}
+
+struct TalkRealtimeJobReceipt: Decodable {
+    let text: String
+    let status: String
+    let jobId: String
+    let runId: String
+    let title: String
+    let state: String
+
+    var providerResult: [String: String] {
+        [
+            "text": self.text,
+            "status": self.status,
+            "jobId": self.jobId,
+            "runId": self.runId,
+            "title": self.title,
+            "state": self.state,
+        ]
+    }
 }
 
 struct TalkRealtimeServerEvent: Decodable {

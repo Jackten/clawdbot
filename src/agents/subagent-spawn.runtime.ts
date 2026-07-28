@@ -38,9 +38,14 @@ export {
   normalizeDeliveryContext,
 } from "../utils/delivery-context.shared.js";
 export { resolveAgentConfig } from "./agent-scope.js";
+export {
+  deriveAgentRunResourceScope,
+  registerAgentRunAdmissionOverride,
+} from "./agent-run-admission.js";
 export { AGENT_LANE_SUBAGENT } from "./lanes.js";
 export { resolveSandboxRuntimeStatus } from "./sandbox/runtime-status.js";
 export { buildSubagentSystemPrompt } from "./subagent-system-prompt.js";
+export { createQueuedTaskRun, finalizeTaskRunByRunId } from "../tasks/detached-task-runtime.js";
 export {
   resolveDisplaySessionKey,
   resolveInternalSessionKey,

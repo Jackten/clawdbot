@@ -31,7 +31,12 @@ import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.generated.js"
  * tables, private file permissions, cached handles, and audit rows for
  * migrations/backups that operate on local state.
  */
-export const OPENCLAW_STATE_SCHEMA_VERSION = 1;
+// Bumped to 6 to match the shipped state DB: the multitasking work (mutation locks, external
+// effect ledger, freshness results, database leases) added tables and stamped user_version=6 while
+// this constant still read 1, so the gateway refused to open its own database on startup.
+// Migrations here are additive (CREATE TABLE IF NOT EXISTS), so a build declaring 6 opens both a
+// freshly created database and an already-migrated one.
+export const OPENCLAW_STATE_SCHEMA_VERSION = 6;
 /** Shared timeout used by state and agent SQLite handles before surfacing busy errors. */
 export const OPENCLAW_SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const OPENCLAW_STATE_DIR_MODE = 0o700;

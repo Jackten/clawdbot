@@ -62,6 +62,94 @@ describe("RealtimeTalkSession consult handoff", () => {
     expect(submit).toHaveBeenCalledWith("call-1", { result: "Basement lights are off." });
   });
 
+  it("returns a running receipt without aborting when the interactive wait expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const receipt = {
+        text: "That work is still running. I’ll deliver the result when it finishes.",
+        status: "accepted",
+        jobId: "run-long",
+        runId: "run-long",
+        title: "Finish the long account audit",
+        state: "running",
+      };
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          return {
+            runId: "run-long",
+            idempotencyKey: "run-long",
+            receipt,
+          };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const addEventListener = vi.fn(() => () => undefined);
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-long",
+        args: { question: "Finish the long account audit" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      await consult;
+
+      expect(submit).toHaveBeenCalledOnce();
+      expect(submit).toHaveBeenCalledWith("call-long", receipt);
+      expect(request.mock.calls.some(([method]) => method === "chat.abort")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the worker session key when cancelling a forked consult", async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === "talk.client.toolCall") {
+        return {
+          runId: "run-worker",
+          sessionKey: "agent:main:talk-job:worker",
+        };
+      }
+      if (method === "chat.abort") {
+        return { ok: true, aborted: true };
+      }
+      throw new Error(`unexpected request: ${method}`);
+    });
+    const controller = new AbortController();
+    const submit = vi.fn();
+    const consult = submitRealtimeTalkConsult({
+      ctx: {
+        client: { request, addEventListener: vi.fn(() => () => undefined) },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      callId: "call-worker",
+      args: { question: "Stop if I cancel" },
+      submit,
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(request).toHaveBeenCalledWith(
+        "talk.client.toolCall",
+        expect.objectContaining({ sessionKey: "agent:main:main" }),
+      );
+    });
+    controller.abort();
+    await consult;
+
+    expect(request).toHaveBeenCalledWith("chat.abort", {
+      sessionKey: "agent:main:talk-job:worker",
+      runId: "run-worker",
+    });
+  });
+
   it("prefers source-reply final text over an earlier empty Talk consult final", async () => {
     let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
     const request = vi.fn(async (method: string) => {

@@ -212,6 +212,22 @@ type AgentWaitResult = {
   yielded?: boolean;
 };
 
+type RealtimeTalkConsultReceipt = {
+  text: string;
+  status: "accepted";
+  jobId: string;
+  runId: string;
+  title: string;
+  state: "running";
+};
+
+class RealtimeTalkWaitExpiredError extends Error {
+  constructor() {
+    super("OpenClaw tool call is still running");
+    this.name = "RealtimeTalkWaitExpiredError";
+  }
+}
+
 const EMPTY_FINAL_FALLBACK_GRACE_MS = 500;
 
 function extractTextFromMessage(message: unknown): string {
@@ -279,7 +295,7 @@ function waitForChatResult(params: {
       return;
     }
     const timer = window.setTimeout(() => {
-      settleReject(new Error("OpenClaw tool call timed out"));
+      settleReject(new RealtimeTalkWaitExpiredError());
     }, params.timeoutMs);
     let settled = false;
     let emptyFinalWaitStarted = false;
@@ -465,11 +481,13 @@ export async function submitRealtimeTalkAgentControl(params: {
             sessionKey: params.ctx.sessionKey,
             text: parsed.text,
             mode: parsed.mode,
+            ...(parsed.jobId ? { jobId: parsed.jobId } : {}),
           })
         : await params.ctx.client.request("talk.client.steer", {
             sessionKey: params.ctx.sessionKey,
             text: parsed.text,
             mode: parsed.mode,
+            ...(parsed.jobId ? { jobId: parsed.jobId } : {}),
           });
     params.emitTalkEvent?.({
       type: "tool.progress",
@@ -532,6 +550,8 @@ export async function submitRealtimeTalkConsult(params: {
   const { ctx, callId, submit } = params;
   ctx.callbacks.onStatus?.("thinking");
   let runId: string | undefined;
+  let runSessionKey = ctx.sessionKey;
+  let waitReceipt: RealtimeTalkConsultReceipt | undefined;
   let aborted = false;
   let submitted = false;
   const submitOnce = (result: unknown) => {
@@ -549,7 +569,7 @@ export async function submitRealtimeTalkConsult(params: {
   const abortRun = () => {
     aborted = true;
     if (runId) {
-      void ctx.client.request("chat.abort", { sessionKey: ctx.sessionKey, runId });
+      void ctx.client.request("chat.abort", { sessionKey: runSessionKey, runId });
     }
   };
   if (params.signal?.aborted) {
@@ -560,20 +580,29 @@ export async function submitRealtimeTalkConsult(params: {
   try {
     const args =
       typeof params.args === "string" ? JSON.parse(params.args || "{}") : (params.args ?? {});
-    const response = await ctx.client.request<{ runId?: string; idempotencyKey?: string }>(
-      "talk.client.toolCall",
-      {
-        sessionKey: ctx.sessionKey,
-        callId,
-        name: REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
-        args,
-        ...(params.relaySessionId ? { relaySessionId: params.relaySessionId } : {}),
-      },
-    );
+    const response = await ctx.client.request<{
+      runId?: string;
+      idempotencyKey?: string;
+      sessionKey?: string;
+      receipt?: RealtimeTalkConsultReceipt;
+    }>("talk.client.toolCall", {
+      sessionKey: ctx.sessionKey,
+      callId,
+      name: REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+      args,
+      ...(params.relaySessionId ? { relaySessionId: params.relaySessionId } : {}),
+    });
     runId = response.runId ?? response.idempotencyKey;
+    runSessionKey = response.sessionKey?.trim() || ctx.sessionKey;
     if (!runId) {
       throw new Error("OpenClaw realtime tool call did not return a run id");
     }
+    waitReceipt =
+      response.receipt ??
+      buildRealtimeTalkConsultReceipt({
+        runId,
+        args,
+      });
     if (params.signal?.aborted) {
       abortRun();
       submitAbortResult();
@@ -592,6 +621,10 @@ export async function submitRealtimeTalkConsult(params: {
       submitAbortResult();
       return;
     }
+    if (error instanceof RealtimeTalkWaitExpiredError && waitReceipt) {
+      submitOnce(waitReceipt);
+      return;
+    }
     submitOnce({
       error: error instanceof Error ? error.message : String(error),
     });
@@ -601,6 +634,31 @@ export async function submitRealtimeTalkConsult(params: {
       ctx.callbacks.onStatus?.("listening");
     }
   }
+}
+
+function buildRealtimeTalkConsultReceipt(params: {
+  runId: string;
+  args: unknown;
+}): RealtimeTalkConsultReceipt {
+  const args =
+    params.args && typeof params.args === "object" && !Array.isArray(params.args)
+      ? (params.args as Record<string, unknown>)
+      : {};
+  const rawTitle =
+    typeof args.question === "string" ? args.question.replace(/\s+/g, " ").trim() : "";
+  const title = rawTitle
+    ? rawTitle.length > 80
+      ? `${rawTitle.slice(0, 79)}…`
+      : rawTitle
+    : "Agent consult";
+  return {
+    text: "That work is still running. I’ll deliver the result when it finishes.",
+    status: "accepted",
+    jobId: params.runId,
+    runId: params.runId,
+    title,
+    state: "running",
+  };
 }
 
 function isAbortError(error: unknown): boolean {

@@ -1,11 +1,35 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  AgentMutationCoordinator,
+  setDefaultAgentMutationCoordinatorForTest,
+} from "../agents/agent-mutation-coordinator.js";
 import type { RunEmbeddedAgentParams } from "../agents/embedded-agent-runner/run/params.js";
+import type { EmbeddedAgentRunResult } from "../agents/embedded-agent-runner/types.js";
 import type {
   ForkSessionEntryFromParentParams,
   ForkSessionEntryFromParentResult,
 } from "../auto-reply/reply/session-fork.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import { runExclusiveSessionLifecycleMutation } from "../sessions/session-lifecycle-admission.js";
+import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
+import {
+  cancelTaskById,
+  getTaskById,
+  listTasksForOwnerKey,
+  maybeDeliverTaskTerminalUpdate,
+  reloadTaskRegistryFromStore,
+  resetTaskRegistryDeliveryRuntimeForTests,
+  resetTaskRegistryForTests,
+  setTaskRegistryDeliveryRuntimeForTests,
+} from "../tasks/runtime-internal.js";
+import {
+  configureTaskRegistryRuntime,
+  type TaskRegistryStore,
+} from "../tasks/task-registry.store.js";
+import { installInMemoryTaskRegistryRuntime } from "../test-utils/task-registry-runtime.js";
 import {
   setRealtimeVoiceAgentConsultDepsForTest,
   consultRealtimeVoiceAgent,
@@ -14,7 +38,9 @@ import {
 } from "./agent-consult-runtime.js";
 import { REALTIME_VOICE_AGENT_CONSULT_TOOL } from "./agent-consult-tool.js";
 
-function createAgentRuntime(payloads: unknown[] = [{ text: "Speak this." }]) {
+function createAgentRuntime(
+  payloads: NonNullable<EmbeddedAgentRunResult["payloads"]> = [{ text: "Speak this." }],
+) {
   const sessionStore: Record<
     string,
     {
@@ -37,10 +63,12 @@ function createAgentRuntime(payloads: unknown[] = [{ text: "Speak this." }]) {
       lastThreadId?: string | number;
     }
   > = {};
-  const runEmbeddedAgent = vi.fn(async () => ({
-    payloads,
-    meta: {},
-  }));
+  const runEmbeddedAgent = vi.fn(
+    async (_params: RunEmbeddedAgentParams): Promise<EmbeddedAgentRunResult> => ({
+      payloads,
+      meta: { durationMs: 0 },
+    }),
+  );
   const updateSessionStore = vi.fn(
     async (
       _storePath: string,
@@ -136,9 +164,37 @@ function createDeferred() {
   return { promise, resolve };
 }
 
+function createDeferredValue<T>() {
+  let resolve = (_value: T) => {};
+  let reject = (_error: unknown) => {};
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("realtime voice agent consult runtime", () => {
+  const sendMessage = vi.fn(async (params: { channel?: string; to: string }) => ({
+    channel: params.channel ?? "unknown",
+    to: params.to,
+    via: "direct" as const,
+    mediaUrl: null,
+  }));
+  let taskStore: TaskRegistryStore;
+
+  beforeEach(() => {
+    resetTaskRegistryForTests({ persist: false });
+    ({ taskStore } = installInMemoryTaskRegistryRuntime());
+    setTaskRegistryDeliveryRuntimeForTests({ sendMessage });
+  });
+
   afterEach(() => {
+    setDefaultAgentMutationCoordinatorForTest(null);
     setRealtimeVoiceAgentConsultDepsForTest(null);
+    resetTaskRegistryDeliveryRuntimeForTests();
+    resetTaskRegistryForTests({ persist: false });
+    sendMessage.mockReset();
   });
 
   it("exposes the shared consult tool based on policy", () => {
@@ -197,6 +253,11 @@ describe("realtime voice agent consult runtime", () => {
     expect(call.agentId).toBe("main");
     expect(call.messageProvider).toBe("voice");
     expect(call.lane).toBe("voice");
+    expect(call.admission).toMatchObject({
+      priority: "background",
+      resourceScope: { kind: "keys", keys: [] },
+      onQueueReason: expect.any(Function),
+    });
     expect(call.toolsAllow).toStrictEqual(["read"]);
     expect(call.provider).toBe("openai");
     expect(call.model).toBe("gpt-5.4");
@@ -217,6 +278,264 @@ describe("realtime voice agent consult runtime", () => {
     expect(call.extraSystemPrompt).toBe(
       "You are the configured OpenClaw agent receiving delegated requests from a live voice bridge. Act on behalf of the user, use available tools when appropriate, and return a brief speakable result.",
     );
+  });
+
+  it("does not present a late voice result as current", async () => {
+    const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "openclaw-talk-freshness-"));
+    try {
+      setDefaultAgentMutationCoordinatorForTest(
+        new AgentMutationCoordinator({
+          databasePath: path.join(temporaryDirectory, "state.sqlite"),
+        }),
+      );
+      const { runtime } = createAgentRuntime([{ text: "The current value is 42." }]);
+
+      const result = await consultRealtimeVoiceAgent({
+        cfg: {} as never,
+        agentRuntime: runtime as never,
+        logger: { warn: vi.fn() },
+        sessionKey: "voice:freshness",
+        messageProvider: "voice",
+        lane: "voice",
+        runIdPrefix: "voice-freshness",
+        args: { question: "What is the current value?" },
+        transcript: [],
+        surface: "a live call",
+        userLabel: "Caller",
+        freshnessDeadlineAtMs: 0,
+      });
+
+      expect(result).toEqual({
+        text: "That result finished after its freshness deadline, so I will not present it as current.",
+      });
+    } finally {
+      closeOpenClawStateDatabaseForTest();
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("delivers exactly once after acceptance, client disconnect, completion, and registry restart", async () => {
+    const deferred = createDeferredValue<EmbeddedAgentRunResult>();
+    const { runtime, sessionStore } = createAgentRuntime();
+    let runAbortSignal: AbortSignal | undefined;
+    runtime.runEmbeddedAgent = vi.fn((params: RunEmbeddedAgentParams) => {
+      runAbortSignal = params.abortSignal;
+      return deferred.promise;
+    });
+    sessionStore["agent:main:main"] = {
+      sessionId: "origin-session",
+      updatedAt: 1,
+      deliveryContext: {
+        channel: "discord",
+        to: "channel:123",
+        accountId: "default",
+      },
+    };
+
+    const receipt = await consultRealtimeVoiceAgent({
+      cfg: {} as never,
+      agentRuntime: runtime as never,
+      logger: { warn: vi.fn() },
+      sessionKey: "voice:consult-wait",
+      spawnedBy: "agent:main:main",
+      messageProvider: "voice",
+      lane: "voice",
+      runIdPrefix: "voice-realtime-consult:wait",
+      args: { question: "Finish the long-running account audit" },
+      transcript: [],
+      surface: "a live phone call",
+      userLabel: "Caller",
+      waitTimeoutMs: 0,
+    });
+
+    if (!("jobId" in receipt)) {
+      throw new Error("expected a durable running receipt");
+    }
+    expect(receipt).toMatchObject({
+      status: "accepted",
+      title: "Finish the long-running account audit",
+      state: "running",
+    });
+    expect(receipt.runId).toContain("voice-realtime-consult:wait:");
+    expect(runAbortSignal?.aborted).toBe(false);
+    expect(getTaskById(receipt.jobId)).toMatchObject({
+      runId: receipt.runId,
+      status: "running",
+      deliveryStatus: "pending",
+      taskKind: "agent_consult",
+      progressSummary: "Queued for background admission.",
+    });
+    expect(listTasksForOwnerKey("agent:main:main")).toEqual([
+      expect.objectContaining({
+        taskId: receipt.jobId,
+        status: "running",
+      }),
+    ]);
+
+    // The accepted job has no dependency on the originating Talk connection
+    // after this point; dropping that client leaves the durable task as owner.
+    deferred.resolve({
+      payloads: [{ text: "The account audit is complete." }],
+      meta: { durationMs: 50 },
+    });
+    await vi.waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "discord",
+        to: "channel:123",
+        content: expect.stringContaining("The account audit is complete."),
+        idempotencyKey: expect.stringContaining(`task-terminal:${receipt.jobId}:succeeded`),
+      }),
+    );
+    expect(getTaskById(receipt.jobId)).toMatchObject({
+      status: "succeeded",
+      deliveryStatus: "delivered",
+    });
+
+    await maybeDeliverTaskTerminalUpdate(receipt.jobId);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    // A restored ledger sees the persisted delivered marker and cannot
+    // publish the same terminal result after a reconnect/restart.
+    resetTaskRegistryForTests({ persist: false });
+    configureTaskRegistryRuntime({ store: taskStore });
+    reloadTaskRegistryFromStore();
+    await maybeDeliverTaskTerminalUpdate(receipt.jobId);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes completion at the wait deadline through durable delivery when the direct response is lost", async () => {
+    let monotonicNow = 100;
+    setRealtimeVoiceAgentConsultDepsForTest({
+      monotonicNow: () => monotonicNow,
+    });
+    const deferred = createDeferredValue<EmbeddedAgentRunResult>();
+    const { runtime, sessionStore } = createAgentRuntime();
+    runtime.runEmbeddedAgent = vi.fn(() => deferred.promise);
+    sessionStore["agent:main:main"] = {
+      sessionId: "origin-session",
+      updatedAt: 1,
+      deliveryContext: {
+        channel: "discord",
+        to: "channel:boundary",
+        accountId: "default",
+      },
+    };
+
+    const pendingReceipt = consultRealtimeVoiceAgent({
+      cfg: {} as never,
+      agentRuntime: runtime as never,
+      logger: { warn: vi.fn() },
+      sessionKey: "voice:consult-boundary",
+      spawnedBy: "agent:main:main",
+      messageProvider: "voice",
+      lane: "voice",
+      runIdPrefix: "voice-realtime-consult:boundary",
+      args: { question: "Finish exactly at the wait boundary" },
+      transcript: [],
+      surface: "a live phone call",
+      userLabel: "Caller",
+      waitTimeoutMs: 10,
+    });
+    await vi.waitFor(() => expect(runtime.runEmbeddedAgent).toHaveBeenCalledTimes(1));
+
+    monotonicNow = 110;
+    deferred.resolve({
+      payloads: [{ text: "Boundary result." }],
+      meta: { durationMs: 10 },
+    });
+    const receipt = await pendingReceipt;
+
+    expect(receipt).toMatchObject({
+      status: "accepted",
+      state: "running",
+    });
+    if (!("jobId" in receipt)) {
+      throw new Error("expected a durable receipt at the wait deadline");
+    }
+    expect(getTaskById(receipt.jobId)).toMatchObject({
+      status: "succeeded",
+      deliveryStatus: "pending",
+    });
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("Boundary result."),
+        idempotencyKey: expect.stringContaining(`task-terminal:${receipt.jobId}:succeeded`),
+      }),
+    );
+
+    // Simulate losing the accepted HTTP/WebSocket response, restarting the
+    // gateway registry, and reconnecting to the same durable owner.
+    resetTaskRegistryForTests({ persist: false });
+    configureTaskRegistryRuntime({ store: taskStore });
+    reloadTaskRegistryFromStore();
+    await maybeDeliverTaskTerminalUpdate(receipt.jobId);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps explicit job cancellation wired to the underlying consult abort signal", async () => {
+    const { runtime } = createAgentRuntime();
+    let runAbortSignal: AbortSignal | undefined;
+    let abortObserved = false;
+    runtime.runEmbeddedAgent = vi.fn(
+      (params: RunEmbeddedAgentParams) =>
+        new Promise<EmbeddedAgentRunResult>((_resolve, reject) => {
+          runAbortSignal = params.abortSignal;
+          params.abortSignal?.addEventListener(
+            "abort",
+            () => {
+              abortObserved = true;
+              reject(params.abortSignal?.reason);
+            },
+            { once: true },
+          );
+        }),
+    );
+
+    const receipt = await consultRealtimeVoiceAgent({
+      cfg: {} as never,
+      agentRuntime: runtime as never,
+      logger: { warn: vi.fn() },
+      sessionKey: "agent:main:voice:cancel",
+      messageProvider: "voice",
+      lane: "voice",
+      runIdPrefix: "voice-realtime-consult:cancel",
+      args: { question: "Keep checking until I stop you" },
+      transcript: [],
+      surface: "a live phone call",
+      userLabel: "Caller",
+      waitTimeoutMs: 0,
+    });
+    if (!("jobId" in receipt)) {
+      throw new Error("expected a durable running receipt");
+    }
+
+    const cancelled = await cancelTaskById({
+      cfg: {} as never,
+      taskId: receipt.jobId,
+      reason: "Stopped by user.",
+    });
+
+    expect(cancelled).toMatchObject({
+      found: true,
+      cancelled: true,
+      task: {
+        taskId: receipt.jobId,
+        status: "cancelled",
+        error: "Stopped by user.",
+      },
+    });
+    expect(runAbortSignal?.aborted).toBe(true);
+    expect(abortObserved).toBe(true);
+    await vi.waitFor(() => {
+      expect(getTaskById(receipt.jobId)).toMatchObject({
+        status: "cancelled",
+        deliveryStatus: "session_queued",
+      });
+    });
   });
 
   it("rejects an archived consult session before mutating or starting work", async () => {

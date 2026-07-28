@@ -97,6 +97,8 @@ export type SubagentRunRecord = {
   runId: string;
   /** Detached task owner; steer/restart changes runId but continues the same task. */
   taskRunId?: string;
+  /** Exact parent attempt that owns this child and propagates cancellation. */
+  parentRunId?: string;
   childSessionKey: string;
   controllerSessionKey?: string;
   requesterSessionKey: string;

@@ -55,7 +55,7 @@ const internalHookMocks = vi.hoisted(() => ({
 }));
 const queueMocks = vi.hoisted(() => ({
   enqueueDelivery: vi.fn(async () => "mock-queue-id"),
-  ackDelivery: vi.fn(async () => {}),
+  ackDelivery: vi.fn(async (_id?: string) => {}),
   failDelivery: vi.fn(async () => {}),
   failDeliveryAfterPlatformSend: vi.fn(async () => {}),
   failDeliveryBeforePlatformSend: vi.fn(async () => {}),
@@ -101,6 +101,7 @@ vi.mock("../../hooks/internal-hooks.js", () => ({
 vi.mock("./delivery-queue.js", () => ({
   enqueueDelivery: queueMocks.enqueueDelivery,
   ackDelivery: queueMocks.ackDelivery,
+  completeDelivery: async (id: string) => await queueMocks.ackDelivery(id),
   failDelivery: queueMocks.failDelivery,
   failDeliveryAfterPlatformSend: queueMocks.failDeliveryAfterPlatformSend,
   failDeliveryBeforePlatformSend: queueMocks.failDeliveryBeforePlatformSend,
@@ -815,6 +816,30 @@ describe("deliverOutboundPayloads", () => {
     expect(commitParams?.result?.messageId).toBe("message-adapter-1");
     expect(results[0]?.channel).toBe("matrix");
     expect(results[0]?.messageId).toBe("message-adapter-1");
+  });
+
+  it("retains transport receipts for an external-effect queue id", async () => {
+    const sendText = vi.fn().mockResolvedValue({
+      channel: "matrix",
+      messageId: "sent-effect-1",
+      roomId: "!room:example",
+    });
+
+    await deliverOutboundPayloads({
+      cfg: {},
+      channel: "matrix",
+      to: "!room:example",
+      payloads: [{ text: "hello" }],
+      deliveryQueueId: "effect:logical-send",
+      deps: { matrix: sendText },
+    });
+
+    expect(queueMocks.enqueueDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "effect:logical-send",
+        retainSentReceipt: true,
+      }),
+    );
   });
 
   it("continues best-effort sends when the precise dispatch timestamp cannot be refreshed", async () => {

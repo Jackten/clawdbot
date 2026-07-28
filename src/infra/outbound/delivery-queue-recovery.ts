@@ -30,11 +30,13 @@ import {
 } from "./delivery-commit-hooks.js";
 import {
   ackDelivery,
+  completeDelivery,
   failDelivery,
   failDeliveryAfterPlatformSend,
   failDeliveryBeforePlatformSend,
   loadPendingDelivery,
   loadPendingDeliveries,
+  loadSentDelivery,
   markDeliveryPlatformOutcomeUnknown,
   moveToFailed,
   type QueuedDelivery,
@@ -77,6 +79,17 @@ export interface PendingDeliveryDrainDecision {
 export type ActiveDeliveryClaimResult<T> =
   | { status: "claimed"; value: T }
   | { status: "claimed-by-other-owner" };
+
+export type PendingDeliveryReconciliationResult =
+  | { status: "missing" }
+  | { status: "not_sent"; entry: QueuedDelivery; error?: string }
+  | {
+      status: "sent";
+      entry: QueuedDelivery;
+      reconciliation?: Extract<ChannelMessageUnknownSendReconciliationResult, { status: "sent" }>;
+      results?: OutboundDeliveryResult[];
+    }
+  | { status: "unresolved"; entry: QueuedDelivery; error?: string };
 
 const MAX_RETRIES = 5;
 
@@ -210,6 +223,59 @@ async function reconcileUnknownQueuedDelivery(opts: {
     opts.log.warn(`Delivery entry ${opts.entry.id} unknown-send reconciliation failed: ${error}`);
     return { status: "unresolved", error, retryable: true };
   }
+}
+
+/**
+ * Reconciles one ledger-linked queue intent without replaying it. Callers may
+ * project a conclusive result, but queue recovery remains the owner that
+ * acknowledges or retries the durable transport row.
+ */
+export async function reconcilePendingDeliveryOutcome(params: {
+  id: string;
+  cfg: OpenClawConfig;
+  stateDir?: string;
+  log?: RecoveryLogger;
+}): Promise<PendingDeliveryReconciliationResult> {
+  const entry = await loadPendingDelivery(params.id, params.stateDir);
+  if (!entry) {
+    const sentEntry = await loadSentDelivery(params.id, params.stateDir);
+    if (sentEntry?.sentResults?.length) {
+      return { status: "sent", entry: sentEntry, results: sentEntry.sentResults };
+    }
+    return { status: "missing" };
+  }
+  if (
+    entry.recoveryState !== "send_attempt_started" &&
+    entry.recoveryState !== "unknown_after_send"
+  ) {
+    return {
+      status: "not_sent",
+      entry,
+      ...(entry.lastError ? { error: entry.lastError } : {}),
+    };
+  }
+  const reconciliation = await reconcileUnknownQueuedDelivery({
+    entry,
+    cfg: params.cfg,
+    log:
+      params.log ??
+      ({
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+      } satisfies RecoveryLogger),
+  });
+  if (reconciliation?.status === "sent") {
+    return { status: "sent", entry, reconciliation };
+  }
+  if (reconciliation?.status === "not_sent") {
+    return { status: "not_sent", entry };
+  }
+  return {
+    status: "unresolved",
+    entry,
+    ...(reconciliation?.error ? { error: reconciliation.error } : {}),
+  };
 }
 
 function buildReconciledSentResult(
@@ -362,6 +428,7 @@ export function isPermanentDeliveryError(error: string): boolean {
 
 async function persistRecoveredPostSendState(opts: {
   entry: QueuedDelivery;
+  results: readonly OutboundDeliveryResult[];
   log: RecoveryLogger;
   stateDir?: string;
 }): Promise<"marked" | "acked" | "failed"> {
@@ -375,7 +442,7 @@ async function persistRecoveredPostSendState(opts: {
       `Delivery entry ${opts.entry.id} failed to persist post-send state; falling back to direct ack: ${formatErrorMessage(markErr)}`,
     );
     try {
-      await ackDelivery(opts.entry.id, opts.stateDir);
+      await completeDelivery(opts.entry.id, opts.results, opts.stateDir);
       return "acked";
     } catch (ackErr) {
       const error = `post-send state persistence failed: marker=${formatErrorMessage(markErr)}; ack=${formatErrorMessage(ackErr)}`;
@@ -408,7 +475,11 @@ async function drainQueuedEntry(opts: {
     });
     if (reconciliation?.status === "sent") {
       try {
-        await ackDelivery(entry.id, opts.stateDir);
+        await completeDelivery(
+          entry.id,
+          [buildReconciledSentResult(entry, reconciliation)],
+          opts.stateDir,
+        );
         await runReconciledSentCommitHooks({
           entry,
           cfg: opts.cfg,
@@ -499,6 +570,7 @@ async function drainQueuedEntry(opts: {
         collectResults([deliveryResult]);
         postSendState ??= await persistRecoveredPostSendState({
           entry,
+          results: deliveredResults,
           log: opts.log,
           stateDir: opts.stateDir,
         });
@@ -516,6 +588,7 @@ async function drainQueuedEntry(opts: {
       if (results.length > 0 || failedOutcomes.some((outcome) => outcome.sentBeforeError)) {
         postSendState ??= await persistRecoveredPostSendState({
           entry,
+          results: deliveredResults,
           log: opts.log,
           stateDir: opts.stateDir,
         });
@@ -537,7 +610,12 @@ async function drainQueuedEntry(opts: {
     }
     postSendState ??=
       results.length > 0
-        ? await persistRecoveredPostSendState({ entry, log: opts.log, stateDir: opts.stateDir })
+        ? await persistRecoveredPostSendState({
+            entry,
+            results: deliveredResults,
+            log: opts.log,
+            stateDir: opts.stateDir,
+          })
         : undefined;
     if (postSendState === "failed") {
       const errMsg = "recovered send completed but queue finalization failed";
@@ -547,7 +625,7 @@ async function drainQueuedEntry(opts: {
     }
     if (postSendState !== "acked") {
       try {
-        await ackDelivery(entry.id, opts.stateDir);
+        await completeDelivery(entry.id, deliveredResults, opts.stateDir);
         postSendState = "acked";
       } catch (ackErr) {
         const ackError = `failed to ack recovered delivery: ${formatErrorMessage(ackErr)}`;
@@ -581,6 +659,7 @@ async function drainQueuedEntry(opts: {
       try {
         postSendState ??= await persistRecoveredPostSendState({
           entry,
+          results: deliveredResults,
           log: opts.log,
           stateDir: opts.stateDir,
         });

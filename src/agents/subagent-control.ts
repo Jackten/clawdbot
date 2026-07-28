@@ -19,7 +19,12 @@ import {
   SUBAGENT_KILL_TASK_ERROR,
   type DetachedTaskTerminalState,
 } from "../tasks/detached-task-runtime-contract.js";
+import { findDetachedTaskRun } from "../tasks/detached-task-runtime.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
+import {
+  deriveAgentRunResourceScope,
+  registerAgentRunAdmissionOverride,
+} from "./agent-run-admission.js";
 import { AGENT_LANE_SUBAGENT } from "./lanes.js";
 import {
   readLatestAssistantReplySnapshot,
@@ -614,6 +619,40 @@ export async function killSubagentRunAdmin(params: { cfg: OpenClawConfig; sessio
   };
 }
 
+/**
+ * Cancels the active children owned by one exact parent attempt.
+ *
+ * Each admin kill cascades through that child's descendants. Matching on
+ * parentRunId avoids terminating children created by a newer run in the same
+ * long-lived session.
+ */
+export async function cancelSubagentRunsForParentRun(params: {
+  cfg: OpenClawConfig;
+  parentRunId: string;
+}): Promise<{ matched: number; killed: number }> {
+  const parentRunId = params.parentRunId.trim();
+  if (!parentRunId) {
+    return { matched: 0, killed: 0 };
+  }
+  const currentChildren = Array.from(getSubagentRunsSnapshotForRead(subagentRuns).values()).filter(
+    (entry) =>
+      entry.parentRunId === parentRunId &&
+      (typeof entry.endedAt !== "number" || entry.pauseReason === "sessions_yield") &&
+      getLatestSubagentRunByChildSessionKey(entry.childSessionKey)?.runId === entry.runId,
+  );
+  let killed = 0;
+  for (const child of currentChildren) {
+    const result = await killSubagentRunAdmin({
+      cfg: params.cfg,
+      sessionKey: child.childSessionKey,
+    });
+    if (result.found && result.killed) {
+      killed += 1 + result.cascadeKilled;
+    }
+  }
+  return { matched: currentChildren.length, killed };
+}
+
 /** Restarts a controlled subagent run with a new steering message. */
 export async function steerControlledSubagentRun(params: {
   cfg: OpenClawConfig;
@@ -758,6 +797,18 @@ export async function steerControlledSubagentRun(params: {
 
   const idempotencyKey = crypto.randomUUID();
   let runId: string = idempotencyKey;
+  const taskRunId = params.entry.taskRunId ?? params.entry.runId;
+  const taskLookup = findDetachedTaskRun({
+    runId: taskRunId,
+    runtime: "subagent",
+    sessionKey: params.entry.childSessionKey,
+    createdAtOrAfter: 0,
+  });
+  const unregisterAdmissionOverride = registerAgentRunAdmissionOverride(idempotencyKey, {
+    priority: "background",
+    jobId: taskLookup.lookup === "available" ? taskLookup.task?.taskId : undefined,
+    resourceScope: deriveAgentRunResourceScope({ request: params.message }),
+  });
   try {
     const response = await subagentControlDeps.callGateway<{ runId: string }>({
       method: "agent",
@@ -786,6 +837,8 @@ export async function steerControlledSubagentRun(params: {
       sessionId: restartSessionId,
       error,
     };
+  } finally {
+    unregisterAdmissionOverride();
   }
 
   const replaced = replaceSubagentRunAfterSteer({

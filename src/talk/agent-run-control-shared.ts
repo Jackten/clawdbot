@@ -51,6 +51,11 @@ export const REALTIME_VOICE_AGENT_CONTROL_TOOL: RealtimeVoiceTool = {
         description:
           "status for progress questions, cancel for stop/abort, steer for changing the current work, followup for work to do after the current result.",
       },
+      jobId: {
+        type: "string",
+        description:
+          "Optional durable job id from an accepted consult receipt. Use it to check or cancel that exact job.",
+      },
     },
     required: ["text", "mode"],
   },
@@ -90,7 +95,8 @@ export type RealtimeVoiceAgentControlResult = {
   active: boolean;
   queued?: boolean;
   aborted?: boolean;
-  target?: "embedded_run" | "reply_run";
+  target?: "embedded_run" | "reply_run" | "task";
+  jobId?: string;
   reason?: string;
   message: string;
   speak: boolean;
@@ -239,6 +245,7 @@ export function shouldAutoControlRealtimeVoiceAgentText(text: string): boolean {
 export function parseRealtimeVoiceAgentControlToolArgs(args: unknown): {
   text: string;
   mode: RealtimeVoiceAgentControlMode;
+  jobId?: string;
 } {
   const parsed = parseRealtimeVoiceAgentControlToolArgsRecord(args);
   const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
@@ -253,7 +260,10 @@ export function parseRealtimeVoiceAgentControlToolArgs(args: unknown): {
   const mode =
     normalizeRealtimeVoiceAgentControlMode((record as Record<string, unknown>).mode) ??
     resolveRealtimeVoiceAgentControlIntent({ text }).mode;
-  return { text, mode };
+  const jobId =
+    normalizeOptionalString((record as Record<string, unknown>).jobId) ??
+    normalizeOptionalString((record as Record<string, unknown>).taskId);
+  return { text, mode, ...(jobId ? { jobId } : {}) };
 }
 
 function parseRealtimeVoiceAgentControlToolArgsRecord(args: unknown): unknown {

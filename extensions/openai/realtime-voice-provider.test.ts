@@ -304,6 +304,7 @@ describe("buildOpenAIRealtimeVoiceProvider", () => {
       supportsBargeIn: true,
       handlesInputAudioBargeIn: true,
       supportsToolCalls: true,
+      supportsVideoFrames: true,
     });
   });
 
@@ -1941,6 +1942,48 @@ describe("buildOpenAIRealtimeVoiceProvider", () => {
         interrupt_response: true,
       },
     );
+  });
+
+  it("attaches an image conversation item without requesting a response", async () => {
+    const provider = buildOpenAIRealtimeVoiceProvider();
+    const bridge = provider.createBridge({
+      providerConfig: { apiKey: "sk-test" }, // pragma: allowlist secret
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    });
+    const connecting = bridge.connect();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) {
+      throw new Error("expected bridge to create a websocket");
+    }
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.emit("open");
+    socket.emit("message", Buffer.from(JSON.stringify({ type: "session.updated" })));
+    await connecting;
+
+    bridge.sendImage?.({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/jpeg",
+      note: "[live video frame]",
+    });
+
+    expect(parseSent(socket).slice(-1)).toEqual([
+      {
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "[live video frame]" },
+            {
+              type: "input_image",
+              image_url: "data:image/jpeg;base64,aGVsbG8=",
+            },
+          ],
+        },
+      },
+    ]);
+    expect(hasSentEventType(socket, "response.create")).toBe(false);
   });
 
   it("defers manual response.create while a realtime response is active", async () => {

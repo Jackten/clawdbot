@@ -67,6 +67,7 @@ vi.mock("../../utils/message-channel.js", async () => {
 
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { createTestRegistry } from "../../test-utils/channel-plugins.js";
+import { OutboundDeliveryPreflightError } from "./deliver-types.js";
 
 let sendMessage: typeof import("./message.js").sendMessage;
 let resetOutboundChannelResolutionStateForTest: typeof import("./channel-resolution.js").resetOutboundChannelResolutionStateForTest;
@@ -353,7 +354,9 @@ describe("sendMessage", () => {
       queuePolicy: "required",
     });
 
-    await expect(send).rejects.toThrow(
+    const error = await send.catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(OutboundDeliveryPreflightError);
+    expect(String(error)).toMatch(
       /missing reconcileUnknownSend[\s\S]*queuePolicy:"best_effort"[\s\S]*omit bestEffort:false/,
     );
 

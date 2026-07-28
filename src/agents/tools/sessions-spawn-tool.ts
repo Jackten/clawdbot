@@ -255,6 +255,8 @@ export function createSessionsSpawnTool(
     agentSessionKey?: string;
     /** Separate key used only for completion routing (registerSubagentRun requesterSessionKey). */
     completionOwnerKey?: string;
+    /** Exact owning run for child cancellation propagation. */
+    parentRunId?: string;
     agentChannel?: GatewayMessageChannel;
     agentAccountId?: string;
     agentTo?: string;
@@ -441,6 +443,7 @@ export function createSessionsSpawnTool(
           try {
             registerSubagentRun({
               runId: childRunId,
+              parentRunId: opts?.parentRunId,
               childSessionKey,
               controllerSessionKey: ownership.controllerSessionKey,
               requesterSessionKey: ownership.completionRequesterSessionKey,
@@ -496,6 +499,7 @@ export function createSessionsSpawnTool(
         {
           agentSessionKey: opts?.agentSessionKey,
           completionOwnerKey: opts?.completionOwnerKey,
+          parentRunId: opts?.parentRunId,
           agentChannel: opts?.agentChannel,
           agentAccountId: opts?.agentAccountId,
           agentTo: opts?.agentTo,

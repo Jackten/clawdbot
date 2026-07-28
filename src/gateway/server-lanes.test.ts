@@ -110,4 +110,45 @@ describe("applyGatewayLaneConcurrency", () => {
     releaseRuns.resolve();
     await Promise.all([first, second]);
   });
+
+  it("keeps one background worker independent from a capacity-one foreground lane", async () => {
+    applyGatewayLaneConcurrency({
+      agents: { defaults: { maxConcurrent: 1 } },
+    } as OpenClawConfig);
+
+    const started = new Set<string>();
+    const bothLanesStarted = createDeferred();
+    const releaseRuns = createDeferred();
+    const run = (name: string) => async () => {
+      started.add(name);
+      if (started.size === 2) {
+        bothLanesStarted.resolve();
+      }
+      await releaseRuns.promise;
+    };
+
+    const foreground = enqueueCommandInLane(CommandLane.Main, run("foreground"), {
+      warnAfterMs: 10_000,
+    });
+    const background = enqueueCommandInLane(CommandLane.Background, run("background"), {
+      warnAfterMs: 10_000,
+    });
+    const queuedBackground = enqueueCommandInLane(
+      CommandLane.Background,
+      run("queued-background"),
+      { warnAfterMs: 10_000 },
+    );
+    const timeout = setTimeout(() => {
+      bothLanesStarted.reject(new Error("timed out waiting for foreground and background lanes"));
+    }, 250);
+
+    try {
+      await bothLanesStarted.promise;
+      expect(started).toEqual(new Set(["foreground", "background"]));
+    } finally {
+      clearTimeout(timeout);
+      releaseRuns.resolve();
+      await Promise.all([foreground, background, queuedBackground]);
+    }
+  });
 });

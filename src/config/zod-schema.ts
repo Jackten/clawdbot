@@ -377,6 +377,7 @@ const TalkRealtimeSchema = z
     reasoningEffort: z.string().min(1).optional(),
     brain: z.enum(["agent-consult", "direct-tools", "none"]).optional(),
     consultRouting: z.enum(["provider-direct", "force-agent-consult"]).optional(),
+    allowImageInput: z.boolean().optional(),
     persistTranscript: z.boolean().optional(),
     clientTools: z.array(TalkRealtimeClientToolSchema).optional(),
     gatewayTools: z.array(TalkRealtimeGatewayToolSchema).optional(),

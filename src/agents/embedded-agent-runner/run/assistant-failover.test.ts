@@ -48,8 +48,8 @@ function makeParams(overrides: Partial<Params> = {}): Params {
     maybeEscalateRateLimitProfileFallback: vi.fn(),
     maybeRetrySameModelRateLimit: vi.fn(async () => false),
     maybeBackoffBeforeOverloadFailover: vi.fn(async () => {}),
-    advanceProviderApiKey: vi.fn(async () => false),
-    advanceAuthProfile: vi.fn(async () => false),
+    advanceProviderApiKey: vi.fn(async () => false as const),
+    advanceAuthProfile: vi.fn(async () => false as const),
   };
   return { ...defaults, ...overrides };
 }
@@ -95,7 +95,7 @@ describe("handleAssistantFailover", () => {
           maybeMarkAuthProfileFailure,
           advanceAuthProfile: vi.fn(async () => {
             events.push("advance");
-            return true;
+            return "profile" as const;
           }),
         }),
       );
@@ -114,7 +114,7 @@ describe("handleAssistantFailover", () => {
     it("retries the same model before spending a rate-limit profile rotation", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => true);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -145,7 +145,7 @@ describe("handleAssistantFailover", () => {
     it("honors disabled rate-limit profile rotations before same-model retry", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => true);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -176,7 +176,7 @@ describe("handleAssistantFailover", () => {
     it("does not spend same-model retry budget on quota-style rate limits", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => true);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -207,7 +207,7 @@ describe("handleAssistantFailover", () => {
     it("does not treat bare 429 quota_exceeded as a short-window throttle", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => true);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -237,7 +237,7 @@ describe("handleAssistantFailover", () => {
     it("does not treat generic rate-limit text as a short-window throttle", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => true);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -267,7 +267,7 @@ describe("handleAssistantFailover", () => {
     it("does not spend same-model retry budget when Retry-After is long", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => true);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -300,7 +300,7 @@ describe("handleAssistantFailover", () => {
       try {
         const maybeRetrySameModelRateLimit = vi.fn(async () => true);
         const maybeEscalateRateLimitProfileFallback = vi.fn();
-        const advanceAuthProfile = vi.fn(async () => true);
+        const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
         const outcome = await handleAssistantFailover(
           makeParams({
@@ -333,7 +333,7 @@ describe("handleAssistantFailover", () => {
     it("allows short Retry-After intervals to use same-model retry", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => true);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -364,7 +364,7 @@ describe("handleAssistantFailover", () => {
     it("allows RESOURCE_EXHAUSTED messages with short-window 429 hints", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => true);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -394,7 +394,7 @@ describe("handleAssistantFailover", () => {
     it("allows quota wording when it points at a per-minute throttle", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => true);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -425,7 +425,7 @@ describe("handleAssistantFailover", () => {
     it("falls back to profile rotation after the same-model rate-limit budget is exhausted", async () => {
       const maybeRetrySameModelRateLimit = vi.fn(async () => false);
       const maybeEscalateRateLimitProfileFallback = vi.fn();
-      const advanceAuthProfile = vi.fn(async () => true);
+      const advanceAuthProfile = vi.fn(async () => "profile" as const);
 
       const outcome = await handleAssistantFailover(
         makeParams({
@@ -462,7 +462,7 @@ describe("handleAssistantFailover", () => {
           cloudCodeAssistFormatError: true,
           lastProfileId: undefined,
           billingFailure: false,
-          advanceAuthProfile: vi.fn(async () => true),
+          advanceAuthProfile: vi.fn(async () => "profile" as const),
           warn,
         }),
       );
@@ -481,7 +481,7 @@ describe("handleAssistantFailover", () => {
           timedOut: true,
           assistantProfileFailureReason: "timeout",
           lastProfileId: "profile-timeout",
-          advanceAuthProfile: vi.fn(async () => true),
+          advanceAuthProfile: vi.fn(async () => "profile" as const),
           maybeMarkAuthProfileFailure,
         }),
       );

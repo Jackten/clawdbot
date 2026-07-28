@@ -1271,6 +1271,7 @@ export async function enqueueRun(state: CronServiceState, id: string, mode?: "du
       return result;
     },
     {
+      priority: "background",
       warnAfterMs: 5_000,
       onWait: (waitMs, queuedAhead) => {
         state.deps.log.warn(

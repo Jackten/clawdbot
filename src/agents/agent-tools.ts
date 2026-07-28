@@ -899,8 +899,6 @@ export function createOpenClawCodingTools(options?: {
   // pass so child sessions inherit the actual parent tool surface.
   const inheritedToolAllowlist: string[] = [];
   const toolPolicyInheritanceSources = capabilityProfile.policy.inheritancePolicies;
-  const shouldInheritEffectiveToolAllowlist =
-    toolPolicyInheritanceSources.some(hasRestrictiveAllowPolicy);
   const cronCreatorToolAllowlist = options?.cronCreatorToolAllowlistRef ?? [];
   const shouldCaptureCronCreatorToolAllowlist = toolPolicyInheritanceSources.some(
     (policy) => hasRestrictiveAllowPolicy(policy) || hasExplicitDenyPolicy(policy),
@@ -1146,9 +1144,10 @@ export function createOpenClawCodingTools(options?: {
       toolDenylist: pluginToolDenylist,
     }),
   });
-  if (shouldInheritEffectiveToolAllowlist) {
-    replaceWithEffectiveToolAllowlist(inheritedToolAllowlist, subagentFiltered);
-  }
+  // Child sessions always receive the parent's final effective surface as an
+  // upper bound. Persisting no allowlist would let a less-restricted target
+  // agent gain tools the parent never had.
+  replaceWithEffectiveToolAllowlist(inheritedToolAllowlist, subagentFiltered);
   if (shouldCaptureCronCreatorToolAllowlist) {
     replaceWithEffectiveCronCreatorToolAllowlist(
       cronCreatorToolAllowlist,

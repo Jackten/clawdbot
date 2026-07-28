@@ -18,6 +18,7 @@ import type {
   RealtimeVoiceBrowserSession,
   RealtimeVoiceBrowserSessionCreateRequest,
   RealtimeVoiceBridgeCreateRequest,
+  RealtimeVoiceImageInput,
   RealtimeVoiceProviderConfig,
   RealtimeVoiceProviderPlugin,
   RealtimeVoiceTool,
@@ -546,6 +547,24 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
       },
     });
     this.requestResponseCreate();
+  }
+
+  sendImage(input: RealtimeVoiceImageInput): void {
+    const note = input.note?.trim();
+    this.sendEvent({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [
+          ...(note ? [{ type: "input_text", text: note }] : []),
+          {
+            type: "input_image",
+            image_url: `data:${input.mimeType};base64,${input.imageBase64}`,
+          },
+        ],
+      },
+    });
   }
 
   triggerGreeting(instructions?: string): void {
@@ -1544,6 +1563,7 @@ export function buildOpenAIRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin 
       supportsBargeIn: true,
       handlesInputAudioBargeIn: true,
       supportsToolCalls: true,
+      supportsVideoFrames: true,
     },
     resolveConfig: ({ rawConfig }) => normalizeProviderConfig(rawConfig),
     isConfigured: ({ cfg, providerConfig }) => {

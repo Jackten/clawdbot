@@ -1037,6 +1037,7 @@ export const FIELD_LABELS: Record<string, string> = {
   "talk.realtime.reasoningEffort": "Talk Realtime Reasoning Effort",
   "talk.realtime.brain": "Talk Realtime Brain",
   "talk.realtime.consultRouting": "Talk Realtime Consult Routing",
+  "talk.realtime.allowImageInput": "Talk Realtime Allow Image Input",
   "talk.realtime.persistTranscript": "Talk Realtime Persist Transcript",
   "talk.realtime.clientTools": "Talk Realtime Client Tools",
   "talk.realtime.clientTools.*": "Talk Realtime Client Tool",

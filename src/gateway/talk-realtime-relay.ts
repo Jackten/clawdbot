@@ -46,6 +46,7 @@ import {
   type TalkSessionController,
   createTalkSessionController,
 } from "../talk/talk-session-controller.js";
+import { reportRealtimeVoiceHealth } from "../talk/voice-health.js";
 import { abortChatRunById } from "./chat-abort.js";
 import type { GatewayRequestContext } from "./server-methods/shared-types.js";
 import {
@@ -56,14 +57,16 @@ import { forgetUnifiedTalkSession } from "./talk-session-registry.js";
 
 const RELAY_SESSION_TTL_MS = 30 * 60 * 1000;
 const MAX_AUDIO_BASE64_BYTES = 512 * 1024;
+const MAX_IMAGE_BYTES = 512 * 1024;
+const IMAGE_INPUT_MIN_INTERVAL_MS = 1_500;
 const MAX_RELAY_SESSIONS_PER_CONN = 2;
 const MAX_RELAY_SESSIONS_GLOBAL = 64;
 const RELAY_EVENT = "talk.event";
 const RELAY_TRANSCRIPT_ECHO_LOOKBACK_MS = 12_000;
 const FORCED_CONSULT_FALLBACK_DELAY_MS = 200;
 const FORCED_CONSULT_RESULT_MAX_CHARS = 1_800;
-const GATEWAY_TOOL_TIMEOUT_MS = 12_000;
-const GATEWAY_TOOL_MAX_BUFFER_BYTES = 64 * 1024;
+export const GATEWAY_TOOL_TIMEOUT_MS = 12_000;
+export const GATEWAY_TOOL_MAX_BUFFER_BYTES = 64 * 1024;
 const log = createSubsystemLogger("talk-realtime-relay");
 
 type TalkRealtimeGatewayToolExecOptions = {
@@ -141,6 +144,8 @@ type RelaySession = {
   completedAgentToolCalls: Set<string>;
   forcedConsults: RealtimeVoiceForcedConsultCoordinator;
   persistTranscript: boolean;
+  allowImageInput: boolean;
+  lastImageAttachedAtMs?: number;
   transcriptTurn: RelayTranscriptTurn;
   transcript: RealtimeVoiceTranscriptEntry[];
 };
@@ -230,7 +235,30 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const runTalkRealtimeGatewayTool: TalkRealtimeGatewayToolRunner = (executable, args, options) =>
+function decodeImageBase64(imageBase64: string): Buffer {
+  const normalized = imageBase64.trim();
+  if (
+    normalized.length === 0 ||
+    normalized.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(normalized)
+  ) {
+    throw new Error("Realtime image input must be valid base64");
+  }
+  const image = Buffer.from(normalized, "base64");
+  if (image.length > MAX_IMAGE_BYTES) {
+    throw new Error(`Realtime image input exceeds ${MAX_IMAGE_BYTES} bytes`);
+  }
+  if (image.length < 3 || image[0] !== 0xff || image[1] !== 0xd8 || image[2] !== 0xff) {
+    throw new Error("Realtime image input must contain JPEG bytes");
+  }
+  return image;
+}
+
+export const runTalkRealtimeGatewayTool: TalkRealtimeGatewayToolRunner = (
+  executable,
+  args,
+  options,
+) =>
   new Promise((resolve, reject) => {
     execFile(executable, args, options, (error, stdout) => {
       if (error) {
@@ -241,7 +269,7 @@ const runTalkRealtimeGatewayTool: TalkRealtimeGatewayToolRunner = (executable, a
     });
   });
 
-function formatGatewayToolExecutionError(error: unknown): string {
+export function formatGatewayToolExecutionError(error: unknown): string {
   if (!error || typeof error !== "object") {
     return "Gateway tool execution failed.";
   }
@@ -497,6 +525,11 @@ function submitRelayAgentControlProviderResults(
 }
 
 function closeRelaySession(session: RelaySession, reason: "completed" | "error"): void {
+  reportRealtimeVoiceHealth({
+    sourceId: `relay:${session.id}`,
+    active: false,
+    healthy: reason !== "error",
+  });
   session.forcedConsults.clear();
   relaySessions.delete(session.id);
   forgetUnifiedTalkSession(session.id);
@@ -814,9 +847,21 @@ export function createTalkRealtimeRelaySession(
     },
     onReady: () => {
       ready = true;
+      reportRealtimeVoiceHealth({
+        sourceId: `relay:${relaySessionId}`,
+        active: true,
+        healthy: true,
+        expiresAtMs,
+      });
       emit({ relaySessionId, type: "ready" }, { type: "session.ready", payload: null });
     },
     onError: (error) => {
+      reportRealtimeVoiceHealth({
+        sourceId: `relay:${relaySessionId}`,
+        active: true,
+        healthy: false,
+        expiresAtMs,
+      });
       const issue = realtimeRelayIssue({
         message: formatError(error),
         provider: params.provider.id,
@@ -831,6 +876,11 @@ export function createTalkRealtimeRelaySession(
       });
     },
     onClose: (reason) => {
+      reportRealtimeVoiceHealth({
+        sourceId: `relay:${relaySessionId}`,
+        active: false,
+        healthy: reason !== "error",
+      });
       const active = relaySessions.get(relaySessionId);
       if (!active) {
         return;
@@ -879,6 +929,7 @@ export function createTalkRealtimeRelaySession(
     completedAgentToolCalls: new Set(),
     forcedConsults: createRealtimeVoiceForcedConsultCoordinator(),
     persistTranscript: params.cfg?.talk?.realtime?.persistTranscript === true,
+    allowImageInput: params.cfg?.talk?.realtime?.allowImageInput === true,
     transcriptTurn: createRelayTranscriptTurn(),
     transcript: [],
   };
@@ -1067,6 +1118,46 @@ export function sendTalkRealtimeRelayAudio(params: {
   }
 }
 
+/** Attaches one rate-limited JPEG conversation item without triggering a provider response. */
+export function attachTalkRealtimeRelayImage(params: {
+  relaySessionId: string;
+  connId: string;
+  imageBase64: string;
+  mimeType: "image/jpeg";
+  note?: string;
+  nowMs?: number;
+}): { accepted: boolean; retryAfterMs?: number } {
+  const session = getRelaySession(params.relaySessionId, params.connId);
+  if (!session.allowImageInput) {
+    throw new Error("Realtime image input is disabled by talk.realtime.allowImageInput");
+  }
+  if (params.mimeType !== "image/jpeg") {
+    throw new Error("Realtime image input only accepts image/jpeg");
+  }
+  decodeImageBase64(params.imageBase64);
+  const nowMs = params.nowMs ?? Date.now();
+  const elapsedMs =
+    session.lastImageAttachedAtMs === undefined
+      ? IMAGE_INPUT_MIN_INTERVAL_MS
+      : nowMs - session.lastImageAttachedAtMs;
+  if (elapsedMs < IMAGE_INPUT_MIN_INTERVAL_MS) {
+    return {
+      accepted: false,
+      retryAfterMs: Math.max(1, IMAGE_INPUT_MIN_INTERVAL_MS - Math.max(0, elapsedMs)),
+    };
+  }
+  const accepted = session.bridge.sendImage({
+    imageBase64: params.imageBase64.trim(),
+    mimeType: params.mimeType,
+    ...(params.note?.trim() ? { note: params.note.trim() } : {}),
+  });
+  if (!accepted) {
+    throw new Error("Realtime provider does not support image input");
+  }
+  session.lastImageAttachedAtMs = nowMs;
+  return { accepted: true };
+}
+
 /** Delivers a tool result from the browser/client side back to the provider. */
 export function submitTalkRealtimeRelayToolResult(params: {
   relaySessionId: string;
@@ -1159,6 +1250,7 @@ export async function steerTalkRealtimeRelayAgentRun(params: {
   sessionKey?: string;
   text: string;
   mode?: string;
+  jobId?: string;
 }): Promise<RealtimeVoiceAgentControlResult> {
   const session = getRelaySession(params.relaySessionId, params.connId);
   const sessionKey = session.sessionKey;
@@ -1173,6 +1265,7 @@ export async function steerTalkRealtimeRelayAgentRun(params: {
     sessionKey,
     text: params.text,
     mode: params.mode,
+    ...(params.jobId ? { jobId: params.jobId } : {}),
     recentEvents: session.talk.recentEvents,
   });
   const turnId = ensureRelayTurn(session);

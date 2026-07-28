@@ -170,6 +170,7 @@ export type TalkSessionCreateResult = SchemaType<"TalkSessionCreateResult">;
 export type TalkSessionJoinParams = SchemaType<"TalkSessionJoinParams">;
 export type TalkSessionJoinResult = SchemaType<"TalkSessionJoinResult">;
 export type TalkSessionAppendAudioParams = SchemaType<"TalkSessionAppendAudioParams">;
+export type TalkSessionAttachImageParams = SchemaType<"TalkSessionAttachImageParams">;
 export type TalkSessionTurnParams = SchemaType<"TalkSessionTurnParams">;
 export type TalkSessionCancelTurnParams = SchemaType<"TalkSessionCancelTurnParams">;
 export type TalkSessionCancelOutputParams = SchemaType<"TalkSessionCancelOutputParams">;

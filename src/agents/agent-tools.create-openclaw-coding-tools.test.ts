@@ -869,6 +869,21 @@ describe("createOpenClawCodingTools", () => {
     expect(inheritedAllow?.includes("process")).toBe(false);
   });
 
+  it("turns a deny-only parent surface into a child upper bound", () => {
+    const createOpenClawToolsMock = vi.mocked(createOpenClawTools);
+    createOpenClawToolsMock.mockClear();
+
+    createOpenClawCodingTools({
+      config: { tools: { deny: ["exec", "process"] } },
+    });
+
+    expect(createOpenClawToolsMock).toHaveBeenCalledTimes(1);
+    const inheritedAllow = latestCreateOpenClawToolsOptions().inheritedToolAllowlist;
+    expectListIncludes(inheritedAllow, ["read", "sessions_spawn"]);
+    expect(inheritedAllow?.includes("exec")).toBe(false);
+    expect(inheritedAllow?.includes("process")).toBe(false);
+  });
+
   it("passes group-restricted tool surface to cron-created agent turns", () => {
     const createOpenClawToolsMock = vi.mocked(createOpenClawTools);
     createOpenClawToolsMock.mockClear();

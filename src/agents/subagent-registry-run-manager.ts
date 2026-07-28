@@ -11,7 +11,11 @@ import {
   SUBAGENT_KILL_TASK_ERROR,
   type DetachedTaskFindResult,
 } from "../tasks/detached-task-runtime-contract.js";
-import { createRunningTaskRun, finalizeTaskRunByRunId } from "../tasks/detached-task-runtime.js";
+import {
+  createRunningTaskRun,
+  finalizeTaskRunByRunId,
+  startTaskRunByRunId,
+} from "../tasks/detached-task-runtime.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import { buildAgentRunTerminalOutcomeFromWaitResult } from "./agent-run-terminal-outcome.js";
@@ -163,6 +167,10 @@ export function markSubagentRunPausedAfterYield(params: {
 
 export type RegisterSubagentRunParams = {
   runId: string;
+  /** Stable detached-task run id; remains fixed across gateway attempt ids. */
+  taskRunId?: string;
+  /** Exact owning agent run for timeout/cancellation propagation. */
+  parentRunId?: string;
   childSessionKey: string;
   controllerSessionKey?: string;
   requesterSessionKey: string;
@@ -746,7 +754,8 @@ export function createSubagentRunManager(params: {
     const requesterOrigin = normalizeDeliveryContext(registerParams.requesterOrigin);
     const entry: SubagentRunRecord = normalizeSubagentRunState({
       runId,
-      taskRunId: runId,
+      taskRunId: registerParams.taskRunId?.trim() || runId,
+      parentRunId: registerParams.parentRunId?.trim() || undefined,
       childSessionKey,
       controllerSessionKey,
       requesterSessionKey,
@@ -794,27 +803,44 @@ export function createSubagentRunManager(params: {
       throw error;
     }
     try {
-      const task = createRunningTaskRun({
-        runtime: "subagent",
-        sourceId: runId,
-        ownerKey: requesterSessionKey,
-        scopeKind: "session",
-        requesterOrigin,
-        childSessionKey,
-        runId,
-        label: registerParams.label,
-        task: registerParams.task,
-        agentId: registerParams.agentId,
-        requesterAgentId: registerParams.requesterAgentId,
-        deliveryStatus:
-          registerParams.expectsCompletionMessage === false ? "not_applicable" : "pending",
-        startedAt: now,
-        lastEventAt: now,
-      });
-      if (!task) {
-        log.warn("Failed to persist background task for subagent run", {
-          runId: registerParams.runId,
+      const taskRunId = entry.taskRunId ?? runId;
+      if (registerParams.taskRunId?.trim()) {
+        const started = startTaskRunByRunId({
+          runId: taskRunId,
+          runtime: "subagent",
+          sessionKey: childSessionKey,
+          startedAt: now,
+          lastEventAt: now,
         });
+        if (started.length === 0) {
+          log.warn("Failed to start queued background task for subagent run", {
+            runId: registerParams.runId,
+            taskRunId,
+          });
+        }
+      } else {
+        const task = createRunningTaskRun({
+          runtime: "subagent",
+          sourceId: taskRunId,
+          ownerKey: requesterSessionKey,
+          scopeKind: "session",
+          requesterOrigin,
+          childSessionKey,
+          runId: taskRunId,
+          label: registerParams.label,
+          task: registerParams.task,
+          agentId: registerParams.agentId,
+          requesterAgentId: registerParams.requesterAgentId,
+          deliveryStatus:
+            registerParams.expectsCompletionMessage === false ? "not_applicable" : "pending",
+          startedAt: now,
+          lastEventAt: now,
+        });
+        if (!task) {
+          log.warn("Failed to persist background task for subagent run", {
+            runId: registerParams.runId,
+          });
+        }
       }
     } catch (error) {
       log.warn("Failed to create background task for subagent run", {

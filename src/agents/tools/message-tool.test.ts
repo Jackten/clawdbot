@@ -1,5 +1,8 @@
 // Message tool tests cover channel action discovery, secret scoping, and
 // outbound message execution context.
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { Type } from "typebox";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -9,8 +12,15 @@ import {
 import type { ChannelMessageAdapterShape } from "../../channels/message/types.js";
 import type { ChannelMessageCapability } from "../../channels/plugins/message-capabilities.js";
 import type { ChannelMessageActionName, ChannelPlugin } from "../../channels/plugins/types.js";
+import { OutboundDeliveryPreflightError } from "../../infra/outbound/deliver-types.js";
 import type { MessageActionRunResult } from "../../infra/outbound/message-action-runner.js";
 import { resetDiagnosticSessionStateForTest } from "../../logging/diagnostic-session-state.js";
+import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
+import {
+  AgentMutationCoordinator,
+  runWithAgentMutationJob,
+  setDefaultAgentMutationCoordinatorForTest,
+} from "../agent-mutation-coordinator.js";
 import { wrapToolWithBeforeToolCallHook } from "../agent-tools.before-tool-call.js";
 import { CRITICAL_THRESHOLD } from "../tool-loop-detection.js";
 type CreateMessageTool = typeof import("./message-tool.js").createMessageTool;
@@ -834,6 +844,208 @@ describe("message tool secret scoping", () => {
     expect(input?.params?.idempotencyKey).toMatch(
       /^run-message-tool:message-tool:[A-Za-z0-9_-]+:[A-Za-z0-9._:-]+$/,
     );
+  });
+
+  it("replays a brokered message result after restart without sending again", async () => {
+    const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "openclaw-message-ledger-"));
+    const databasePath = path.join(temporaryDirectory, "state.sqlite");
+    mockSendResult();
+    const tool = createMessageTool({
+      getRuntimeConfig: mocks.getRuntimeConfig,
+      runMessageAction: mocks.runMessageAction as never,
+      runId: "attempt-1",
+    });
+    const run = (runId: string) =>
+      runWithAgentMutationJob(
+        {
+          jobId: "durable-message-job",
+          runId,
+          resourceScope: { kind: "keys", keys: [] },
+        },
+        () =>
+          tool.execute("stable-call", {
+            action: "send",
+            message: "send once",
+            to: "telegram:123",
+          }),
+      );
+
+    try {
+      setDefaultAgentMutationCoordinatorForTest(
+        new AgentMutationCoordinator({ databasePath, pollIntervalMs: 1 }),
+      );
+      await run("attempt-1");
+      expect(lastRunMessageActionInput()?.params?.idempotencyKey).toMatch(/^effect:[a-f0-9]{64}$/);
+      expect(mocks.runMessageAction).toHaveBeenCalledTimes(1);
+
+      closeOpenClawStateDatabaseForTest();
+      setDefaultAgentMutationCoordinatorForTest(
+        new AgentMutationCoordinator({ databasePath, pollIntervalMs: 1 }),
+      );
+      await run("attempt-2");
+      expect(mocks.runMessageAction).toHaveBeenCalledTimes(1);
+    } finally {
+      setDefaultAgentMutationCoordinatorForTest(null);
+      closeOpenClawStateDatabaseForTest();
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds a missing-queue reconciliation and lets a new job retry", async () => {
+    const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "openclaw-message-unknown-"));
+    const databasePath = path.join(temporaryDirectory, "state.sqlite");
+    mocks.runMessageAction.mockRejectedValue(new Error("gateway timeout after dispatch"));
+    const tool = createMessageTool({
+      getRuntimeConfig: mocks.getRuntimeConfig,
+      runMessageAction: mocks.runMessageAction as never,
+      runId: "same-run",
+    });
+    const execute = (jobId: string, toolCallId: string) =>
+      runWithAgentMutationJob(
+        {
+          jobId,
+          runId: "same-run",
+          resourceScope: { kind: "keys", keys: [] },
+        },
+        () =>
+          tool.execute(toolCallId, {
+            action: "send",
+            bestEffort: false,
+            message: "send exactly once",
+            to: "telegram:123",
+          }),
+      );
+
+    try {
+      setDefaultAgentMutationCoordinatorForTest(
+        new AgentMutationCoordinator({ databasePath, pollIntervalMs: 1 }),
+      );
+      await expect(execute("same-run-message-job", "model-call-a")).rejects.toThrow(
+        "unknown outcome",
+      );
+      const firstIdempotencyKey = firstRunMessageActionInput()?.params?.idempotencyKey;
+
+      await expect(execute("same-run-message-job", "model-call-b")).rejects.toThrow(
+        "has no entry, so the platform send did not start",
+      );
+      expect(mocks.runMessageAction).toHaveBeenCalledTimes(1);
+      expect(firstIdempotencyKey).toMatch(/^effect:[a-f0-9]{64}$/);
+
+      mocks.runMessageAction.mockResolvedValue({
+        kind: "send",
+        action: "send",
+        channel: "telegram",
+        to: "telegram:123",
+        handledBy: "plugin",
+        payload: {},
+        dryRun: true,
+      } satisfies MessageActionRunResult);
+      await expect(execute("operator-retry-job", "model-call-c")).resolves.toBeDefined();
+      expect(mocks.runMessageAction).toHaveBeenCalledTimes(2);
+    } finally {
+      setDefaultAgentMutationCoordinatorForTest(null);
+      closeOpenClawStateDatabaseForTest();
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a missing queue row unknown when the adapter did not require it", async () => {
+    const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "openclaw-message-opaque-"));
+    const databasePath = path.join(temporaryDirectory, "state.sqlite");
+    mocks.runMessageAction.mockRejectedValue(new Error("gateway timeout after dispatch"));
+    const tool = createMessageTool({
+      getRuntimeConfig: mocks.getRuntimeConfig,
+      runMessageAction: mocks.runMessageAction as never,
+      runId: "opaque-run",
+    });
+    const execute = (toolCallId: string) =>
+      runWithAgentMutationJob(
+        {
+          jobId: "opaque-message-job",
+          runId: "opaque-run",
+          resourceScope: { kind: "keys", keys: [] },
+        },
+        () =>
+          tool.execute(toolCallId, {
+            action: "send",
+            message: "send exactly once",
+            to: "telegram:123",
+          }),
+      );
+
+    try {
+      setDefaultAgentMutationCoordinatorForTest(
+        new AgentMutationCoordinator({ databasePath, pollIntervalMs: 1 }),
+      );
+      await expect(execute("model-call-a")).rejects.toThrow("unknown outcome");
+      await expect(execute("model-call-b")).rejects.toThrow(
+        "Verify the external platform manually",
+      );
+      expect(mocks.runMessageAction).toHaveBeenCalledTimes(1);
+    } finally {
+      setDefaultAgentMutationCoordinatorForTest(null);
+      closeOpenClawStateDatabaseForTest();
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("records required-delivery preflight rejection as failed so a new job can retry", async () => {
+    const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "openclaw-message-preflight-"));
+    const databasePath = path.join(temporaryDirectory, "state.sqlite");
+    mocks.runMessageAction
+      .mockRejectedValueOnce(
+        new OutboundDeliveryPreflightError(
+          "Required durable message send is unsupported for telegram",
+        ),
+      )
+      .mockResolvedValueOnce({
+        kind: "send",
+        action: "send",
+        channel: "telegram",
+        to: "telegram:123",
+        handledBy: "plugin",
+        payload: {},
+        dryRun: false,
+      } satisfies MessageActionRunResult);
+    const tool = createMessageTool({
+      getRuntimeConfig: mocks.getRuntimeConfig,
+      runMessageAction: mocks.runMessageAction as never,
+      runId: "preflight-run",
+    });
+    const execute = (jobId: string) =>
+      runWithAgentMutationJob(
+        {
+          jobId,
+          runId: "preflight-run",
+          resourceScope: { kind: "keys", keys: [] },
+        },
+        () =>
+          tool.execute("stable-call", {
+            action: "send",
+            message: "send exactly once",
+            to: "telegram:123",
+          }),
+      );
+
+    try {
+      setDefaultAgentMutationCoordinatorForTest(
+        new AgentMutationCoordinator({ databasePath, pollIntervalMs: 1 }),
+      );
+      await expect(execute("preflight-job-1")).rejects.toThrow(
+        /External effect .* failed: Required durable message send is unsupported/,
+      );
+
+      closeOpenClawStateDatabaseForTest();
+      setDefaultAgentMutationCoordinatorForTest(
+        new AgentMutationCoordinator({ databasePath, pollIntervalMs: 1 }),
+      );
+      await expect(execute("preflight-job-2")).resolves.toBeDefined();
+      expect(mocks.runMessageAction).toHaveBeenCalledTimes(2);
+    } finally {
+      setDefaultAgentMutationCoordinatorForTest(null);
+      closeOpenClawStateDatabaseForTest();
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
   });
 
   it("reuses the unresolved autogenerated idempotency key for exact retries", async () => {

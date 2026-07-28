@@ -9,7 +9,7 @@ import {
 
 // Generic durable delivery queue storage shared by session and outbound queues.
 // Queue-specific wrappers own payload shape; this layer owns SQLite state.
-type QueueStatus = "pending" | "failed";
+type QueueStatus = "pending" | "failed" | "sent";
 type DeliveryQueueDatabase = Pick<OpenClawStateKyselyDatabase, "delivery_queue_entries">;
 
 /** Indexed metadata extracted from queue payloads for diagnostics and recovery. */
@@ -185,6 +185,35 @@ export function loadDeliveryQueueEntry(
   return row ? inflate(row) : null;
 }
 
+/** Load a retained successfully sent queue entry by ID. */
+export function loadSentDeliveryQueueEntry(
+  queueName: string,
+  id: string,
+  stateDir?: string,
+): DeliveryQueueEntryState | null {
+  const database = openStateDatabase(stateDir);
+  const queueDb = getNodeSqliteKysely<DeliveryQueueDatabase>(database.db);
+  const row = executeSqliteQueryTakeFirstSync(
+    database.db,
+    queueDb
+      .selectFrom("delivery_queue_entries")
+      .select([
+        "id",
+        "entry_json",
+        "enqueued_at",
+        "retry_count",
+        "last_attempt_at",
+        "last_error",
+        "platform_send_started_at",
+        "recovery_state",
+      ])
+      .where("queue_name", "=", queueName)
+      .where("id", "=", id)
+      .where("status", "=", "sent"),
+  ) as QueueRow | undefined;
+  return row ? inflate(row) : null;
+}
+
 /** Load all pending entries for a queue namespace in database order. */
 export function loadDeliveryQueueEntries(
   queueName: string,
@@ -240,6 +269,25 @@ export function updateDeliveryQueueEntry(
     throw enoent(queueName, id);
   }
   upsertDeliveryQueueEntry({ queueName, entry: update(current), stateDir });
+}
+
+/** Retain a successful projection outside the pending replay set. */
+export function markDeliveryQueueEntrySent(
+  queueName: string,
+  id: string,
+  stateDir: string | undefined,
+  update: (entry: DeliveryQueueEntryState) => DeliveryQueueEntryState,
+): void {
+  const current = loadDeliveryQueueEntry(queueName, id, stateDir);
+  if (!current) {
+    throw enoent(queueName, id);
+  }
+  upsertDeliveryQueueEntry({
+    queueName,
+    entry: update(current),
+    status: "sent",
+    stateDir,
+  });
 }
 
 /** Dead-lettered entry counts for one queue namespace. */

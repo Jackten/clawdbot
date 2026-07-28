@@ -64,6 +64,7 @@ describe("listGatewayMethods", () => {
     expect(methods).toContain("talk.session.create");
     expect(methods).toContain("talk.session.join");
     expect(methods).toContain("talk.session.appendAudio");
+    expect(methods).toContain("talk.session.attachImage");
     expect(methods).toContain("talk.session.startTurn");
     expect(methods).toContain("talk.session.endTurn");
     expect(methods).toContain("talk.session.cancelTurn");

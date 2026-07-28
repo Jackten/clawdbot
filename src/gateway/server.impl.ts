@@ -2,6 +2,7 @@
 // and WebSocket surfaces, config reload hooks, and graceful restart/shutdown.
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
+import { configureAgentRunAdmissionHealth } from "../agents/agent-run-admission.js";
 import {
   getActiveEmbeddedRunCount,
   resolveActiveEmbeddedRunSessionId,
@@ -62,6 +63,7 @@ import {
 } from "../secrets/runtime-state.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { createLazyPromise } from "../shared/lazy-runtime.js";
+import { getRealtimeVoiceHealthSnapshot } from "../talk/voice-health.js";
 import { createAuthRateLimiter, type AuthRateLimiter } from "./auth-rate-limit.js";
 import { resolveGatewayAuth } from "./auth.js";
 import type { RestartRecoveryCandidate } from "./chat-abort.js";
@@ -843,6 +845,10 @@ export async function startGatewayServer(
   }
   const serverStartedAt = Date.now();
   const readinessEventLoopHealth = createGatewayEventLoopHealthMonitor();
+  configureAgentRunAdmissionHealth({
+    readLoadDegraded: () => readinessEventLoopHealth.snapshot()?.degraded === true,
+    readVoiceHealth: getRealtimeVoiceHealthSnapshot,
+  });
   let startupSidecarsReady = minimalTestGateway;
   let startupPendingReason = "startup-sidecars";
   let releaseStartupAccountStarts = () => {};

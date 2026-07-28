@@ -16,6 +16,7 @@ const transcriptPersistenceMocks = vi.hoisted(() => ({
 vi.mock("../talk/realtime-transcript-persistence.js", () => transcriptPersistenceMocks);
 
 import {
+  attachTalkRealtimeRelayImage,
   cancelTalkRealtimeRelayTurn,
   clearTalkRealtimeRelaySessionsForTest,
   createTalkRealtimeRelaySession,
@@ -26,7 +27,13 @@ import {
   submitTalkRealtimeRelayToolResult,
 } from "./talk-realtime-relay.js";
 
+type GatewayToolRunner = NonNullable<
+  Parameters<typeof createTalkRealtimeRelaySession>[0]["gatewayToolRunner"]
+>;
+
 describe("talk realtime gateway relay", () => {
+  const jpegBase64 = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString("base64");
+  const secondJpegBase64 = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0xd9]).toString("base64");
   afterEach(() => {
     clearTalkRealtimeRelaySessionsForTest();
     vi.useRealTimers();
@@ -209,7 +216,7 @@ describe("talk realtime gateway relay", () => {
     expectRecordFields(mockCallArg(mock, 0, 2), { runId: "run-1", state: "aborted" });
   }
 
-  function createGatewayToolRelayFixture(gatewayToolRunner: ReturnType<typeof vi.fn>) {
+  function createGatewayToolRelayFixture(gatewayToolRunner: GatewayToolRunner) {
     let bridgeRequest: RealtimeVoiceBridgeCreateRequest | undefined;
     const bridge = {
       connect: vi.fn(async () => undefined),
@@ -293,6 +300,134 @@ describe("talk realtime gateway relay", () => {
     });
     return { bridge, bridgeRequest: () => bridgeRequest, session };
   }
+
+  function createImageInputRelay(params: {
+    allowImageInput: boolean;
+    providerSupportsImages?: boolean;
+  }) {
+    const sendImage = vi.fn();
+    const bridge = {
+      connect: vi.fn(async () => undefined),
+      sendAudio: vi.fn(),
+      ...(params.providerSupportsImages === false ? {} : { sendImage }),
+      setMediaTimestamp: vi.fn(),
+      submitToolResult: vi.fn(),
+      acknowledgeMark: vi.fn(),
+      close: vi.fn(),
+      isConnected: vi.fn(() => true),
+    };
+    const provider: RealtimeVoiceProviderPlugin = {
+      id: "relay-test",
+      label: "Relay Test",
+      isConfigured: () => true,
+      createBridge: () => bridge,
+    };
+    const session = createTalkRealtimeRelaySession({
+      context: { broadcastToConnIds: vi.fn() } as never,
+      connId: "conn-1",
+      cfg: { talk: { realtime: { allowImageInput: params.allowImageInput } } },
+      provider,
+      providerConfig: {},
+      instructions: "brief",
+      tools: [],
+    });
+    return { sendImage, session };
+  }
+
+  it("attaches JPEG input and rate-limits accepted frames per relay", () => {
+    const fixture = createImageInputRelay({ allowImageInput: true });
+    const first = attachTalkRealtimeRelayImage({
+      relaySessionId: fixture.session.relaySessionId,
+      connId: "conn-1",
+      imageBase64: jpegBase64,
+      mimeType: "image/jpeg",
+      note: "  [live video frame]  ",
+      nowMs: 10_000,
+    });
+    const limited = attachTalkRealtimeRelayImage({
+      relaySessionId: fixture.session.relaySessionId,
+      connId: "conn-1",
+      imageBase64: secondJpegBase64,
+      mimeType: "image/jpeg",
+      nowMs: 11_000,
+    });
+    const next = attachTalkRealtimeRelayImage({
+      relaySessionId: fixture.session.relaySessionId,
+      connId: "conn-1",
+      imageBase64: secondJpegBase64,
+      mimeType: "image/jpeg",
+      nowMs: 11_500,
+    });
+
+    expect(first).toEqual({ accepted: true });
+    expect(limited).toEqual({ accepted: false, retryAfterMs: 500 });
+    expect(next).toEqual({ accepted: true });
+    expect(fixture.sendImage).toHaveBeenCalledTimes(2);
+    expect(fixture.sendImage).toHaveBeenNthCalledWith(1, {
+      imageBase64: jpegBase64,
+      mimeType: "image/jpeg",
+      note: "[live video frame]",
+    });
+  });
+
+  it("rejects disabled, unsupported, malformed, and oversized image input", () => {
+    const disabled = createImageInputRelay({ allowImageInput: false });
+    expect(() =>
+      attachTalkRealtimeRelayImage({
+        relaySessionId: disabled.session.relaySessionId,
+        connId: "conn-1",
+        imageBase64: jpegBase64,
+        mimeType: "image/jpeg",
+      }),
+    ).toThrow(/allowImageInput/);
+    stopTalkRealtimeRelaySession({
+      relaySessionId: disabled.session.relaySessionId,
+      connId: "conn-1",
+    });
+
+    const unsupported = createImageInputRelay({
+      allowImageInput: true,
+      providerSupportsImages: false,
+    });
+    expect(() =>
+      attachTalkRealtimeRelayImage({
+        relaySessionId: unsupported.session.relaySessionId,
+        connId: "conn-1",
+        imageBase64: jpegBase64,
+        mimeType: "image/jpeg",
+      }),
+    ).toThrow(/provider does not support/i);
+    stopTalkRealtimeRelaySession({
+      relaySessionId: unsupported.session.relaySessionId,
+      connId: "conn-1",
+    });
+
+    const enabled = createImageInputRelay({ allowImageInput: true });
+    expect(() =>
+      attachTalkRealtimeRelayImage({
+        relaySessionId: enabled.session.relaySessionId,
+        connId: "conn-1",
+        imageBase64: "not-base64",
+        mimeType: "image/jpeg",
+      }),
+    ).toThrow(/valid base64/i);
+    expect(() =>
+      attachTalkRealtimeRelayImage({
+        relaySessionId: enabled.session.relaySessionId,
+        connId: "conn-1",
+        imageBase64: Buffer.from("not a jpeg").toString("base64"),
+        mimeType: "image/jpeg",
+      }),
+    ).toThrow(/JPEG bytes/i);
+    expect(() =>
+      attachTalkRealtimeRelayImage({
+        relaySessionId: enabled.session.relaySessionId,
+        connId: "conn-1",
+        imageBase64: Buffer.alloc(512 * 1024 + 1).toString("base64"),
+        mimeType: "image/jpeg",
+      }),
+    ).toThrow(/exceeds 524288 bytes/i);
+  });
 
   it("persists one completed direct voice turn when enabled", async () => {
     const fixture = createTranscriptPersistenceRelay(true);

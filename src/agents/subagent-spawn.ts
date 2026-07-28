@@ -85,8 +85,11 @@ import {
   DEFAULT_SUBAGENT_MAX_SPAWN_DEPTH,
   buildSubagentSystemPrompt,
   callGateway,
+  createQueuedTaskRun,
+  deriveAgentRunResourceScope,
   dispatchGatewayMethodInProcess,
   emitSessionLifecycleEvent,
+  finalizeTaskRunByRunId,
   forkSessionEntryFromParent,
   getGlobalHookRunner,
   getSessionBindingService,
@@ -106,6 +109,7 @@ import {
   resolveSandboxRuntimeStatus,
   updateSessionStore,
   resolveLeastPrivilegeOperatorScopesForMethod,
+  registerAgentRunAdmissionOverride,
 } from "./subagent-spawn.runtime.js";
 import type {
   SpawnSubagentContextMode,
@@ -184,6 +188,8 @@ type SpawnSubagentParams = {
 
 type SpawnSubagentContext = {
   agentSessionKey?: string;
+  /** Exact agent run that owns this child, used for cancellation propagation. */
+  parentRunId?: string;
   /** Separate key used only for completion routing, not sandbox policy. */
   completionOwnerKey?: string;
   agentChannel?: string;
@@ -200,6 +206,40 @@ type SpawnSubagentContext = {
   inheritedToolAllowlist?: string[];
   inheritedToolDenylist?: string[];
 };
+
+type ChildSpawnReservation =
+  | { ok: true; release: () => void }
+  | { ok: false; activeAndPending: number };
+
+const pendingChildSpawnsByRequester = new Map<string, number>();
+
+function reserveChildSpawn(
+  requesterSessionKey: string,
+  maxChildren: number,
+): ChildSpawnReservation {
+  const pending = pendingChildSpawnsByRequester.get(requesterSessionKey) ?? 0;
+  const activeAndPending = countActiveRunsForSession(requesterSessionKey) + pending;
+  if (activeAndPending >= maxChildren) {
+    return { ok: false, activeAndPending };
+  }
+  pendingChildSpawnsByRequester.set(requesterSessionKey, pending + 1);
+  let released = false;
+  return {
+    ok: true,
+    release: () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      const current = pendingChildSpawnsByRequester.get(requesterSessionKey) ?? 0;
+      if (current <= 1) {
+        pendingChildSpawnsByRequester.delete(requesterSessionKey);
+      } else {
+        pendingChildSpawnsByRequester.set(requesterSessionKey, current - 1);
+      }
+    },
+  };
+}
 
 export type SpawnSubagentResult = {
   status: "accepted" | "forbidden" | "error";
@@ -1539,6 +1579,24 @@ export async function spawnSubagentDirect(
   }
   const contextEnginePreparation = contextEnginePrepareResult.preparation;
 
+  // The active registry count is not enough: two concurrent tool calls can
+  // both observe N-1 children before either registers. Reserve synchronously
+  // immediately before dispatch so the N+1th child is rejected deterministically.
+  const spawnReservation = reserveChildSpawn(requesterInternalKey, maxChildren);
+  if (!spawnReservation.ok) {
+    await rollbackPreparedContextEngine(contextEnginePreparation);
+    await cleanupFailedSpawnBeforeAgentStart({
+      childSessionKey,
+      attachmentAbsDir,
+      emitLifecycleHooks: threadBindingReady,
+      deleteTranscript: true,
+    });
+    return {
+      status: "forbidden",
+      error: `sessions_spawn has reached max active children for this session (${spawnReservation.activeAndPending}/${maxChildren})`,
+    };
+  }
+
   const childIdem = crypto.randomUUID();
   let childRunId: string = childIdem;
   const deliverInitialChildRunDirectly =
@@ -1546,6 +1604,72 @@ export async function spawnSubagentDirect(
   const shouldAnnounceCompletion = deliverInitialChildRunDirectly
     ? false
     : expectsCompletionMessage;
+  let queuedTaskId: string;
+  try {
+    const queuedTask = createQueuedTaskRun({
+      runtime: "subagent",
+      sourceId: childIdem,
+      ownerKey: ownership.completionRequesterSessionKey,
+      scopeKind: "session",
+      requesterOrigin,
+      childSessionKey,
+      runId: childIdem,
+      label: label || undefined,
+      task,
+      agentId: targetAgentId,
+      requesterAgentId,
+      deliveryStatus: shouldAnnounceCompletion ? "pending" : "not_applicable",
+    });
+    if (!queuedTask) {
+      throw new Error("task runtime rejected the queued child task");
+    }
+    queuedTaskId = queuedTask.taskId;
+  } catch (err) {
+    spawnReservation.release();
+    await rollbackPreparedContextEngine(contextEnginePreparation);
+    await cleanupFailedSpawnBeforeAgentStart({
+      childSessionKey,
+      attachmentAbsDir,
+      emitLifecycleHooks: threadBindingReady,
+      deleteTranscript: true,
+    });
+    return {
+      status: "error",
+      error: `Failed to create governed child task: ${summarizeError(err)}`,
+      childSessionKey,
+      runId: childRunId,
+    };
+  }
+  const unregisterAdmissionOverride = registerAgentRunAdmissionOverride(childIdem, {
+    priority: "background",
+    jobId: queuedTaskId,
+    resourceScope: deriveAgentRunResourceScope({
+      request: task,
+      messageTo: childSessionOrigin?.to,
+      messageThreadId: childSessionOrigin?.threadId,
+    }),
+  });
+  const releaseSpawnAdmission = () => {
+    unregisterAdmissionOverride();
+    spawnReservation.release();
+  };
+  const finalizeFailedSpawnTask = (error: string) => {
+    try {
+      const now = Date.now();
+      finalizeTaskRunByRunId({
+        runId: childIdem,
+        runtime: "subagent",
+        sessionKey: childSessionKey,
+        status: "failed",
+        endedAt: now,
+        lastEventAt: now,
+        error,
+        suppressDelivery: true,
+      });
+    } catch {
+      // The original spawn error remains authoritative.
+    }
+  };
   try {
     const {
       spawnedBy: _spawnedBy,
@@ -1588,6 +1712,7 @@ export async function spawnSubagentDirect(
       childRunId = runId;
     }
   } catch (err) {
+    releaseSpawnAdmission();
     await rollbackPreparedContextEngine(contextEnginePreparation);
     if (attachmentAbsDir) {
       try {
@@ -1642,6 +1767,7 @@ export async function spawnSubagentDirect(
       // Best-effort only.
     }
     const messageText = summarizeError(err);
+    finalizeFailedSpawnTask(messageText);
     return {
       status: "error",
       error: messageText,
@@ -1653,6 +1779,8 @@ export async function spawnSubagentDirect(
   try {
     registerSubagentRun({
       runId: childRunId,
+      taskRunId: childIdem,
+      parentRunId: ctx.parentRunId,
       childSessionKey,
       controllerSessionKey: ownership.controllerSessionKey,
       requesterSessionKey: ownership.completionRequesterSessionKey,
@@ -1675,6 +1803,7 @@ export async function spawnSubagentDirect(
       retainAttachmentsOnKeep: retainOnSessionKeep,
     });
   } catch (err) {
+    releaseSpawnAdmission();
     await rollbackPreparedContextEngine(contextEnginePreparation);
     if (attachmentAbsDir) {
       try {
@@ -1696,6 +1825,7 @@ export async function spawnSubagentDirect(
     } catch {
       // Best-effort cleanup only.
     }
+    finalizeFailedSpawnTask(`Failed to register subagent run: ${summarizeError(err)}`);
     return {
       status: "error",
       error: `Failed to register subagent run: ${summarizeError(err)}`,
@@ -1703,6 +1833,7 @@ export async function spawnSubagentDirect(
       runId: childRunId,
     };
   }
+  releaseSpawnAdmission();
 
   if (hookRunner?.hasHooks("subagent_spawned")) {
     try {

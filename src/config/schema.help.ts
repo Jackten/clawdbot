@@ -215,6 +215,8 @@ export const FIELD_HELP: Record<string, string> = {
     "Talk reasoning strategy: agent-consult for Gateway-mediated agent help, direct-tools for local tool calls, or none.",
   "talk.realtime.consultRouting":
     "Gateway relay fallback for final user transcripts when the realtime provider skips openclaw_agent_consult. provider-direct preserves provider replies; force-agent-consult routes through OpenClaw.",
+  "talk.realtime.allowImageInput":
+    "Allow an authenticated owning client to attach rate-limited JPEG images to its Gateway-relayed realtime Talk session. Disabled by default.",
   "talk.realtime.persistTranscript":
     "Persist completed Gateway-relayed realtime voice turns into the configured agent's main session so session history and Memory Core can recall them. Disabled by default; turns handled by openclaw_agent_consult are skipped because the consult already persists them.",
   "talk.realtime.clientTools":

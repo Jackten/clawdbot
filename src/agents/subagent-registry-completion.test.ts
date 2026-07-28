@@ -86,6 +86,48 @@ describe("emitSubagentEndedHookOnce", () => {
     ).toBe(false);
   });
 
+  it("runtime validation blocks progress-only child claims from becoming deliverables", () => {
+    const endedAt = Date.now();
+    const terminal = mod.resolveFinalizedSubagentTaskState({
+      ...createRunEntry(),
+      endedAt,
+      outcome: { status: "ok" },
+      expectsCompletionMessage: true,
+      completion: {
+        required: true,
+        resultText: "I'll investigate this now.",
+        capturedAt: endedAt,
+      },
+    });
+
+    expect(terminal).toMatchObject({
+      status: "succeeded",
+      terminalOutcome: "blocked",
+      terminalSummary:
+        "Required completion ended with progress-only text, not a final deliverable.",
+    });
+  });
+
+  it("projects child failures as failed task state for parent aggregation", () => {
+    const endedAt = Date.now();
+    const terminal = mod.resolveFinalizedSubagentTaskState({
+      ...createRunEntry(),
+      endedAt,
+      outcome: { status: "error", error: "child proof failed" },
+      completion: {
+        required: true,
+        resultText: "partial evidence",
+        capturedAt: endedAt,
+      },
+    });
+
+    expect(terminal).toMatchObject({
+      status: "failed",
+      error: "child proof failed",
+      terminalSummary: null,
+    });
+  });
+
   it("records ended hook marker even when no subagent_ended hooks are registered", async () => {
     lifecycleMocks.getGlobalHookRunner.mockReturnValue({
       hasHooks: () => false,

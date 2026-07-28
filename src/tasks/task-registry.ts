@@ -18,6 +18,7 @@ import { normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.j
 import { createLazyPromiseLoader } from "../shared/lazy-runtime.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import { isDeliverableMessageChannel } from "../utils/message-channel.js";
+import { cancelActiveCliTaskRun, resetActiveCliTaskRunsForTests } from "./cli-task-cancel.js";
 import { cancelActiveCronTaskRun } from "./cron-task-cancel.js";
 import { SUBAGENT_KILL_TASK_ERROR } from "./detached-task-runtime-contract.js";
 import { isChildlessNativeSubagentTask } from "./native-subagent-task.js";
@@ -2221,7 +2222,21 @@ export async function cancelTaskById(params: {
   try {
     // A direct kill is only a provisional terminal projection. Re-read the
     // owning subagent run before promotion so its canonical completion can win.
-    if (task.runtime !== "cli") {
+    if (task.runtime === "cli" && task.taskKind === "agent_consult") {
+      if (
+        !(await cancelActiveCliTaskRun({
+          runId: task.runId,
+          reason: params.reason?.trim() || "Cancelled by operator.",
+        }))
+      ) {
+        return {
+          found: true,
+          cancelled: false,
+          reason: "Agent consult has no active cancellation handle.",
+          task: cloneTaskRecord(task),
+        };
+      }
+    } else if (task.runtime !== "cli") {
       if (task.runtime === "cron") {
         if (
           !cancelActiveCronTaskRun({
@@ -2599,6 +2614,7 @@ export function deleteTaskRecordById(taskId: string): boolean {
 }
 
 export function resetTaskRegistryForTests(opts?: { persist?: boolean }) {
+  resetActiveCliTaskRunsForTests();
   clearTaskRegistryMemory();
   restoreAttempted = false;
   resetTaskRegistryRuntimeForTests();

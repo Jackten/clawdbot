@@ -45,6 +45,15 @@ export interface AcpSessions {
   updated_at: number;
 }
 
+export interface AgentDatabaseLeases {
+  agent_id: string;
+  lease_id: string;
+  opened_at: number;
+  owner_pid: number;
+  owner_start_time: number | null;
+  path: string;
+}
+
 export interface AgentDatabases {
   agent_id: string;
   last_seen_at: number;
@@ -53,10 +62,53 @@ export interface AgentDatabases {
   size_bytes: number | null;
 }
 
+export interface AgentExternalEffectEvents {
+  created_at: number;
+  detail_json: string | null;
+  idempotency_key: string;
+  sequence: Generated<number>;
+  status: string;
+}
+
+export interface AgentExternalEffects {
+  created_at: number;
+  effect_kind: string;
+  error: string | null;
+  idempotency_key: string;
+  job_id: string;
+  logical_slot: string;
+  payload_hash: string;
+  resource_key: string | null;
+  result_json: string | null;
+  run_id: string;
+  status: string;
+  updated_at: number;
+}
+
+export interface AgentFreshnessResults {
+  checked_at: number;
+  deadline_at: number;
+  job_id: string;
+  produced_at: number;
+  result_json: string | null;
+  result_key: string;
+  status: string;
+}
+
 export interface AgentModelCatalogs {
   agent_dir: string;
   catalog_key: string;
   raw_json: string;
+  updated_at: number;
+}
+
+export interface AgentMutationLocks {
+  acquired_at: number | null;
+  fencing_token: number;
+  lease_expires_at: number | null;
+  owner_id: string | null;
+  owner_run_id: string | null;
+  resource_key: string;
   updated_at: number;
 }
 
@@ -610,6 +662,68 @@ export interface InstalledPluginIndex {
   warning: string | null;
 }
 
+export interface JobdEffects {
+  claim_fencing_token: number | null;
+  created_at: number;
+  effect_kind: string;
+  error: string | null;
+  idempotency_key: string;
+  job_id: string;
+  logical_slot: string;
+  receipt_json: string | null;
+  request_hash: string;
+  resource_key: string;
+  status: string;
+  updated_at: number;
+}
+
+export interface JobdJobEvents {
+  created_at: number;
+  detail: string | null;
+  event_id: Generated<number>;
+  fencing_token: number;
+  job_id: string;
+  kind: string;
+  worker_id: string | null;
+}
+
+export interface JobdJobs {
+  capability: string;
+  created_at: number;
+  delivery_json: string;
+  ended_at: number | null;
+  fencing_token: Generated<number>;
+  idempotency_key: string;
+  job_id: string;
+  kind: string;
+  lease_expires_at: number | null;
+  payload_hash: string;
+  payload_json: string;
+  priority_rank: number;
+  started_at: number | null;
+  status: string;
+  terminal_error: string | null;
+  terminal_summary: string | null;
+  updated_at: number;
+  worker_id: string | null;
+}
+
+export interface JobdOutbox {
+  created_at: number;
+  delivered_at: number | null;
+  fencing_token: Generated<number>;
+  idempotency_key: string;
+  job_id: string;
+  last_error: string | null;
+  lease_expires_at: number | null;
+  outbox_id: string;
+  payload_json: string;
+  receipt_json: string | null;
+  status: string;
+  updated_at: number;
+  worker_id: string | null;
+}
+
 export interface MacosPortGuardianRecords {
   command: string;
   mode: string;
@@ -925,6 +1039,14 @@ export interface SubagentRuns {
   workspace_dir: string | null;
 }
 
+export interface TalkClientSessions {
+  conn_id: string;
+  device_id: string;
+  expires_at_ms: number;
+  session_key: string | null;
+  updated_at_ms: number;
+}
+
 export interface TaskDeliveryState {
   last_notified_event_at: number | null;
   requester_origin_json: string | null;
@@ -1057,8 +1179,13 @@ export interface DB {
   acp_replay_events: AcpReplayEvents;
   acp_replay_sessions: AcpReplaySessions;
   acp_sessions: AcpSessions;
+  agent_database_leases: AgentDatabaseLeases;
   agent_databases: AgentDatabases;
+  agent_external_effect_events: AgentExternalEffectEvents;
+  agent_external_effects: AgentExternalEffects;
+  agent_freshness_results: AgentFreshnessResults;
   agent_model_catalogs: AgentModelCatalogs;
+  agent_mutation_locks: AgentMutationLocks;
   android_notification_recent_packages: AndroidNotificationRecentPackages;
   apns_registrations: ApnsRegistrations;
   audit_events: AuditEvents;
@@ -1094,6 +1221,10 @@ export interface DB {
   gateway_restart_intent: GatewayRestartIntent;
   gateway_restart_sentinel: GatewayRestartSentinel;
   installed_plugin_index: InstalledPluginIndex;
+  jobd_effects: JobdEffects;
+  jobd_job_events: JobdJobEvents;
+  jobd_jobs: JobdJobs;
+  jobd_outbox: JobdOutbox;
   macos_port_guardian_records: MacosPortGuardianRecords;
   managed_outgoing_image_records: ManagedOutgoingImageRecords;
   media_blobs: MediaBlobs;
@@ -1116,6 +1247,7 @@ export interface DB {
   skill_usage: SkillUsage;
   state_leases: StateLeases;
   subagent_runs: SubagentRuns;
+  talk_client_sessions: TalkClientSessions;
   task_delivery_state: TaskDeliveryState;
   task_runs: TaskRuns;
   tui_last_sessions: TuiLastSessions;

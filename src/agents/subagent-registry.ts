@@ -123,11 +123,16 @@ type BrowserCleanupModule = Pick<
   typeof import("../browser-lifecycle-cleanup.js"),
   "cleanupBrowserSessionsForLifecycleEnd"
 >;
+type SubagentControlModule = Pick<
+  typeof import("./subagent-control.js"),
+  "cancelSubagentRunsForParentRun"
+>;
 
 type SubagentRegistryDeps = {
   callGateway: typeof callGateway;
   captureSubagentCompletionReply: SubagentAnnounceModule["captureSubagentCompletionReply"];
   cleanupBrowserSessionsForLifecycleEnd: typeof cleanupBrowserSessionsForLifecycleEnd;
+  cancelSubagentRunsForParentRun: SubagentControlModule["cancelSubagentRunsForParentRun"];
   getSubagentRunsSnapshotForRead: typeof getSubagentRunsSnapshotForRead;
   getRuntimeConfig: typeof getRuntimeConfig;
   onAgentEvent: typeof onAgentEvent;
@@ -152,6 +157,9 @@ const subagentAnnounceLoader = createLazyImportLoader<SubagentAnnounceModule>(
 const browserCleanupLoader = createLazyImportLoader<BrowserCleanupModule>(
   () => import("../browser-lifecycle-cleanup.js"),
 );
+const subagentControlLoader = createLazyImportLoader<SubagentControlModule>(
+  () => import("./subagent-control.js"),
+);
 
 async function loadSubagentAnnounceModule(): Promise<SubagentAnnounceModule> {
   return await subagentAnnounceLoader.load();
@@ -165,6 +173,8 @@ async function loadCleanupBrowserSessionsForLifecycleEnd(): Promise<
 
 const defaultSubagentRegistryDeps: SubagentRegistryDeps = {
   callGateway,
+  cancelSubagentRunsForParentRun: async (params) =>
+    (await subagentControlLoader.load()).cancelSubagentRunsForParentRun(params),
   captureSubagentCompletionReply: async (sessionKey, options) =>
     (await loadSubagentAnnounceModule()).captureSubagentCompletionReply(sessionKey, options),
   cleanupBrowserSessionsForLifecycleEnd: async (params) =>
@@ -1423,6 +1433,26 @@ function ensureListener() {
         return;
       }
       const phase = evt.data?.phase;
+      const stopReason = typeof evt.data?.stopReason === "string" ? evt.data.stopReason : undefined;
+      const shouldCancelOwnedChildren =
+        (phase === "end" || phase === "error") &&
+        evt.data?.yielded !== true &&
+        (evt.data?.aborted === true ||
+          stopReason === "timeout" ||
+          isAbortedAgentStopReason(stopReason));
+      if (shouldCancelOwnedChildren) {
+        void subagentRegistryDeps
+          .cancelSubagentRunsForParentRun({
+            cfg: subagentRegistryDeps.getRuntimeConfig(),
+            parentRunId: evt.runId,
+          })
+          .catch((error) => {
+            log.warn("failed to propagate parent termination to child runs", {
+              parentRunId: evt.runId,
+              error,
+            });
+          });
+      }
       const entry = subagentRuns.get(evt.runId);
       if (!entry) {
         if (phase === "end" && typeof evt.sessionKey === "string") {
@@ -1451,7 +1481,6 @@ function ensureListener() {
       const error = typeof evt.data?.error === "string" ? evt.data.error : undefined;
       const livenessState =
         typeof evt.data?.livenessState === "string" ? evt.data.livenessState : undefined;
-      const stopReason = typeof evt.data?.stopReason === "string" ? evt.data.stopReason : undefined;
       // sessions_yield ends the turn by aborting the run signal, so a yielded
       // terminal can also look aborted. An explicit yield is authoritative — pause,
       // don't kill — else the tracking task settles `cancelled` with a false notice (#92448).
@@ -1622,6 +1651,7 @@ export function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
   runtimePluginsLoader.clear();
   subagentAnnounceLoader.clear();
   browserCleanupLoader.clear();
+  subagentControlLoader.clear();
   clearSubagentRunsReadCacheForTest();
   stopSweeper();
   sweepInProgress = false;

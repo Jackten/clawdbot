@@ -7,11 +7,13 @@ import { RECOVERY_REPLAY_SPACING_MS } from "../delivery-recovery.shared.js";
 import { OutboundDeliveryError, type OutboundPayloadDeliveryOutcome } from "./deliver-types.js";
 import { attachOutboundDeliveryCommitHook } from "./delivery-commit-hooks.js";
 import {
+  completeDelivery,
   enqueueDelivery,
   loadPendingDeliveries,
   markDeliveryPlatformOutcomeUnknown,
   markDeliveryPlatformSendAttemptStarted,
   MAX_RETRIES,
+  reconcilePendingDeliveryOutcome,
   recoverPendingDeliveries,
 } from "./delivery-queue.js";
 import {
@@ -542,6 +544,85 @@ describe("delivery-queue recovery", () => {
     expect(await loadPendingDeliveries(tmpDir())).toHaveLength(0);
   });
 
+  it("reconciles a ledger-linked queue intent without replaying it", async () => {
+    const id = await enqueueDelivery(
+      {
+        id: "effect:ledger-linked",
+        channel: "demo-channel-a",
+        to: "+1",
+        payloads: [{ text: "maybe sent" }],
+      },
+      tmpDir(),
+    );
+    await markDeliveryPlatformSendAttemptStarted(id, tmpDir());
+    await markDeliveryPlatformOutcomeUnknown(id, tmpDir());
+    const receipt = {
+      primaryPlatformMessageId: "platform-1",
+      platformMessageIds: ["platform-1"],
+      parts: [{ platformMessageId: "platform-1", kind: "text" as const, index: 0 }],
+      sentAt: 1,
+    };
+    const reconcileUnknownSend = vi.fn().mockResolvedValue({
+      status: "sent",
+      messageId: "platform-1",
+      receipt,
+    });
+    resolveOutboundChannelMessageAdapterMock.mockReturnValue({
+      durableFinal: {
+        capabilities: { reconcileUnknownSend: true },
+        reconcileUnknownSend,
+      },
+    });
+
+    const outcome = await reconcilePendingDeliveryOutcome({
+      id,
+      cfg: baseCfg,
+      stateDir: tmpDir(),
+    });
+
+    expect(id).toBe("effect:ledger-linked");
+    expect(outcome).toMatchObject({
+      status: "sent",
+      entry: { id: "effect:ledger-linked", to: "+1" },
+      reconciliation: { receipt },
+    });
+    expect(reconcileUnknownSend).toHaveBeenCalledTimes(1);
+    expect(await loadPendingDeliveries(tmpDir())).toHaveLength(1);
+  });
+
+  it("retains a sent receipt for ledger reconciliation after queue completion", async () => {
+    const id = await enqueueDelivery(
+      {
+        id: "effect:completed-ledger-link",
+        channel: "demo-channel-a",
+        to: "+1",
+        payloads: [{ text: "sent" }],
+        retainSentReceipt: true,
+      },
+      tmpDir(),
+    );
+    const sentResult = {
+      channel: "telegram" as const,
+      messageId: "platform-complete-1",
+    };
+
+    await completeDelivery(id, [sentResult], tmpDir());
+    const outcome = await reconcilePendingDeliveryOutcome({
+      id,
+      cfg: baseCfg,
+      stateDir: tmpDir(),
+    });
+
+    expect(readOutboundQueueStatus(tmpDir(), id)).toBe("sent");
+    expect(await loadPendingDeliveries(tmpDir())).toHaveLength(0);
+    expect(outcome).toMatchObject({
+      status: "sent",
+      entry: { id, to: "+1" },
+      results: [sentResult],
+    });
+    expect(resolveOutboundChannelMessageAdapterMock).not.toHaveBeenCalled();
+  });
+
   it("acks unknown-after-send entries reconciled as already sent before commit hooks", async () => {
     const id = await enqueueDelivery(
       {
@@ -876,6 +957,10 @@ describe("delivery-queue recovery", () => {
       );
       return {
         ...actual,
+        completeDelivery: vi.fn(async (entryId: string, _results: unknown, stateDir?: string) => {
+          recoveryStateAtAck = (await actual.loadPendingDelivery(entryId, stateDir))?.recoveryState;
+          throw new Error("ack state db locked");
+        }),
         ackDelivery: vi.fn(async (entryId: string, stateDir?: string) => {
           recoveryStateAtAck = (await actual.loadPendingDelivery(entryId, stateDir))?.recoveryState;
           throw new Error("ack state db locked");
@@ -925,6 +1010,9 @@ describe("delivery-queue recovery", () => {
       );
       return {
         ...actual,
+        completeDelivery: vi.fn(async () => {
+          throw new Error("ack state db locked");
+        }),
         ackDelivery: vi.fn(async () => {
           throw new Error("ack state db locked");
         }),
@@ -1080,6 +1168,9 @@ describe("delivery-queue recovery", () => {
         ...actual,
         markDeliveryPlatformOutcomeUnknown: vi.fn(async () => {
           throw new Error("post-send state db locked");
+        }),
+        completeDelivery: vi.fn(async () => {
+          throw new Error("ack state db locked");
         }),
         ackDelivery: vi.fn(async () => {
           throw new Error("ack state db locked");

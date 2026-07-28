@@ -13,6 +13,7 @@ export {
   listTaskRecords,
   listTasksForFlowId,
   listTasksForOwnerKey,
+  listTasksForRelatedSessionKey,
   linkTaskToFlowById,
   markTaskLostById,
   markTaskRunningByRunId,

@@ -5,7 +5,11 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 const loadManifestMetadataSnapshotMock = vi.hoisted(() => vi.fn());
 const getCurrentPluginMetadataSnapshotMock = vi.hoisted(() => vi.fn());
 const getActivePluginRegistryWorkspaceDirFromStateMock = vi.hoisted(() => vi.fn());
-const normalizeProviderModelIdWithRuntimeMock = vi.hoisted(() => vi.fn(() => undefined));
+type NormalizeProviderModelIdWithRuntime =
+  typeof import("./provider-model-normalization.runtime.js").normalizeProviderModelIdWithRuntime;
+const normalizeProviderModelIdWithRuntimeMock = vi.hoisted(() =>
+  vi.fn<NormalizeProviderModelIdWithRuntime>(() => undefined),
+);
 
 vi.mock("../plugins/current-plugin-metadata-snapshot.js", () => ({
   getCurrentPluginMetadataSnapshot: getCurrentPluginMetadataSnapshotMock,

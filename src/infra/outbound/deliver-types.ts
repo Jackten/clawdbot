@@ -55,6 +55,17 @@ export type OutboundPayloadDeliveryOutcome =
       stage: OutboundDeliveryFailureStage;
     };
 
+/**
+ * A delivery requirement failed before durable enqueue or platform I/O.
+ * Callers may safely record this as a failed effect rather than an unknown send.
+ */
+export class OutboundDeliveryPreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OutboundDeliveryPreflightError";
+  }
+}
+
 /** Error carrying partial delivery results when an outbound send fails mid-batch. */
 export class OutboundDeliveryError extends Error {
   readonly results: OutboundDeliveryResult[];

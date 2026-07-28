@@ -473,6 +473,7 @@ export const coreGatewayHandlers: GatewayRequestHandlers = {
       "talk.session.create",
       "talk.session.join",
       "talk.session.appendAudio",
+      "talk.session.attachImage",
       "talk.session.startTurn",
       "talk.session.endTurn",
       "talk.session.cancelTurn",

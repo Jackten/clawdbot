@@ -24,6 +24,7 @@ import {
 } from "../media/media-reference.js";
 import { sniffMimeFromBase64 } from "../media/sniff-mime-from-base64.js";
 import { clampNumber } from "../utils.js";
+import { getAgentMutationContext } from "./agent-mutation-coordinator.js";
 import {
   REQUIRED_PARAM_GROUPS,
   assertRequiredParams,
@@ -672,14 +673,31 @@ export function wrapToolMemoryFlushAppendOnlyWrite(
         );
       }
 
-      await appendMemoryFlushContent({
-        absolutePath: allowedAbsolutePath,
-        root: options.root,
-        relativePath: options.relativePath,
-        content,
-        sandbox: options.sandbox,
-        signal,
-      });
+      const mutation = getAgentMutationContext();
+      if (mutation && !options.sandbox) {
+        await mutation.coordinator.commitFile({
+          jobId: mutation.jobId,
+          runId: mutation.runId,
+          filePath: allowedAbsolutePath,
+          signal,
+          update: (current) => {
+            const separator =
+              current.length > 0 && !current.endsWith("\n") && !content.startsWith("\n")
+                ? "\n"
+                : "";
+            return `${current}${separator}${content}`;
+          },
+        });
+      } else {
+        await appendMemoryFlushContent({
+          absolutePath: allowedAbsolutePath,
+          root: options.root,
+          relativePath: options.relativePath,
+          content,
+          sandbox: options.sandbox,
+          signal,
+        });
+      }
       return {
         content: [{ type: "text", text: `Appended content to ${options.relativePath}.` }],
         details: {

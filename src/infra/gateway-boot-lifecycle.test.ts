@@ -63,6 +63,37 @@ function insertBootRows(
 }
 
 describe("gateway crash-loop breaker", () => {
+  it("creates the Stage 3 control tables before gateway server startup", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-gateway-stage3-schema-"));
+    const env = { OPENCLAW_STATE_DIR: stateDir } as NodeJS.ProcessEnv;
+
+    const bootId = recordGatewayBootStart(env, 1_000);
+    const { db } = openOpenClawStateDatabase({ env });
+    const tableNames = db
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'table'
+           AND name IN (
+             'agent_mutation_locks',
+             'agent_external_effects',
+             'agent_external_effect_events',
+             'agent_freshness_results'
+           )
+         ORDER BY name`,
+      )
+      .all()
+      .map((row) => (row as { name: string }).name);
+
+    expect(bootId).toBeTruthy();
+    expect(tableNames).toEqual([
+      "agent_external_effect_events",
+      "agent_external_effects",
+      "agent_freshness_results",
+      "agent_mutation_locks",
+    ]);
+  });
+
   it("trips from the persisted unclean boot count", () => {
     const db = createLifecycleDb();
     const nowMs = 1_000_000;

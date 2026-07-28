@@ -15,6 +15,7 @@ import { createLazyRuntimeModule } from "../../shared/lazy-runtime.js";
 import { formatErrorMessage } from "../errors.js";
 import { resolveOutboundChannelPlugin } from "./channel-resolution.js";
 import { resolveMessageChannelSelection } from "./channel-selection.js";
+import { OutboundDeliveryPreflightError } from "./deliver-types.js";
 import {
   resolveOutboundDurableFinalDeliverySupport,
   type DurableFinalDeliveryRequirements,
@@ -276,7 +277,7 @@ async function assertRequiredMessageSendDurability(params: {
     support.reason === "capability_mismatch" && support.capability
       ? `missing ${support.capability}`
       : support.reason;
-  throw new Error(
+  throw new OutboundDeliveryPreflightError(
     `Required durable message send is unsupported for ${params.channel}: ${suffix}. ` +
       'Use queuePolicy:"best_effort" for best-effort delivery, omit bestEffort:false in message-tool calls, or use a channel with required durable delivery support.',
   );
@@ -427,6 +428,7 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
             idempotencyKey: params.mirror.idempotencyKey ?? params.idempotencyKey,
           }
         : undefined,
+      deliveryQueueId: params.idempotencyKey,
     });
     if (!params.bestEffort && (send.status === "failed" || send.status === "partial_failed")) {
       throw send.error;

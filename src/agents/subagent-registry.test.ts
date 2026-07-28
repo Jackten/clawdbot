@@ -160,6 +160,7 @@ const mocks = vi.hoisted(() => ({
     (runs: Map<string, import("./subagent-registry.types.js").SubagentRunRecord>) => new Map(runs),
   ),
   captureSubagentCompletionReply: vi.fn(async () => "final completion reply"),
+  cancelSubagentRunsForParentRun: vi.fn(async () => ({ matched: 1, killed: 1 })),
   cleanupBrowserSessionsForLifecycleEnd: vi.fn(async () => {}),
   runSubagentAnnounceFlow: vi.fn(async () => true),
   getGlobalHookRunner: vi.fn(() => null),
@@ -295,6 +296,7 @@ describe("subagent registry seam flow", () => {
     });
     mod.testing.setDepsForTest({
       callGateway: mocks.callGateway as typeof import("../gateway/call.js").callGateway,
+      cancelSubagentRunsForParentRun: mocks.cancelSubagentRunsForParentRun,
       captureSubagentCompletionReply: mocks.captureSubagentCompletionReply,
       cleanupBrowserSessionsForLifecycleEnd: mocks.cleanupBrowserSessionsForLifecycleEnd,
       onAgentEvent: mocks.onAgentEvent,
@@ -315,6 +317,62 @@ describe("subagent registry seam flow", () => {
     mod.testing.setDepsForTest();
     mod.resetSubagentRegistryForTests({ persist: false });
     vi.useRealTimers();
+  });
+
+  it("propagates parent cancellation and timeout, but not interactive yield, to children", async () => {
+    mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent.wait") {
+        return { status: "pending" };
+      }
+      return {};
+    });
+    mod.registerSubagentRun({
+      runId: "run-child",
+      parentRunId: "run-parent",
+      childSessionKey: "agent:main:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "wait for parent",
+      cleanup: "keep",
+    });
+    const lifecycleHandler = mocks.onAgentEvent.mock.calls.at(-1)?.[0];
+    expect(lifecycleHandler).toBeTypeOf("function");
+
+    lifecycleHandler?.({
+      runId: "run-parent",
+      seq: 1,
+      ts: Date.now(),
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        endedAt: Date.now(),
+        aborted: true,
+        stopReason: "timeout",
+      },
+    });
+    await vi.waitFor(() => {
+      expect(mocks.cancelSubagentRunsForParentRun).toHaveBeenCalledWith({
+        cfg: mocks.getRuntimeConfig(),
+        parentRunId: "run-parent",
+      });
+    });
+
+    mocks.cancelSubagentRunsForParentRun.mockClear();
+    lifecycleHandler?.({
+      runId: "run-parent",
+      seq: 2,
+      ts: Date.now(),
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        endedAt: Date.now(),
+        aborted: true,
+        stopReason: "aborted",
+        yielded: true,
+      },
+    });
+    await Promise.resolve();
+    expect(mocks.cancelSubagentRunsForParentRun).not.toHaveBeenCalled();
   });
 
   it("lists active and pending-delivery child sessions for maintenance preservation", () => {

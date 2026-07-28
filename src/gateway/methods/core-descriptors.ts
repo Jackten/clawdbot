@@ -81,6 +81,7 @@ export const CORE_GATEWAY_METHOD_SPECS: readonly CoreGatewayMethodSpec[] = [
   { name: "talk.session.create", scope: "operator.write" },
   { name: "talk.session.join", scope: "operator.write" },
   { name: "talk.session.appendAudio", scope: "operator.write" },
+  { name: "talk.session.attachImage", scope: "operator.write" },
   { name: "talk.session.startTurn", scope: "operator.write" },
   { name: "talk.session.endTurn", scope: "operator.write" },
   { name: "talk.session.cancelTurn", scope: "operator.write" },

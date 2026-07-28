@@ -148,6 +148,9 @@ export async function loadSubagentSpawnModuleForTest(params: {
   resolveSubagentSpawnModelSelection?: () => string | undefined;
   getSubagentDepthFromSessionStore?: (sessionKey: string, opts?: unknown) => number;
   countActiveRunsForSession?: (sessionKey: string) => number;
+  createQueuedTaskRunMock?: MockFn;
+  finalizeTaskRunByRunIdMock?: MockFn;
+  registerAgentRunAdmissionOverrideMock?: MockFn;
   resolveSandboxRuntimeStatus?: (params: {
     cfg?: Record<string, unknown>;
     sessionKey?: string;
@@ -259,6 +262,15 @@ export async function loadSubagentSpawnModuleForTest(params: {
     DEFAULT_SUBAGENT_MAX_SPAWN_DEPTH: 3,
     ADMIN_SCOPE: "operator.admin",
     AGENT_LANE_SUBAGENT: "subagent",
+    createQueuedTaskRun:
+      params.createQueuedTaskRunMock ??
+      vi.fn((taskParams: { runId?: string }) => ({
+        taskId: `task:${taskParams.runId ?? "child"}`,
+      })),
+    deriveAgentRunResourceScope: () => ({ kind: "exclusive" }),
+    finalizeTaskRunByRunId: params.finalizeTaskRunByRunIdMock ?? vi.fn(() => []),
+    registerAgentRunAdmissionOverride:
+      params.registerAgentRunAdmissionOverrideMock ?? vi.fn(() => () => undefined),
     getRuntimeConfig: () =>
       params.getRuntimeConfig?.() ??
       createSubagentSpawnTestConfig(params.workspaceDir ?? os.tmpdir()),

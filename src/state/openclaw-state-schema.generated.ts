@@ -133,6 +133,75 @@ CREATE INDEX IF NOT EXISTS idx_state_leases_expiry
 CREATE INDEX IF NOT EXISTS idx_state_leases_owner
   ON state_leases(owner, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS agent_mutation_locks (
+  resource_key TEXT NOT NULL PRIMARY KEY,
+  fencing_token INTEGER NOT NULL,
+  owner_id TEXT,
+  owner_run_id TEXT,
+  lease_expires_at INTEGER,
+  acquired_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_mutation_locks_owner
+  ON agent_mutation_locks(owner_id, lease_expires_at);
+
+CREATE TABLE IF NOT EXISTS agent_external_effects (
+  idempotency_key TEXT NOT NULL PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  logical_slot TEXT NOT NULL,
+  effect_kind TEXT NOT NULL,
+  resource_key TEXT,
+  payload_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (
+    status IN ('prepared', 'submitting', 'applied', 'failed', 'unknown')
+  ),
+  result_json TEXT,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_external_effects_job
+  ON agent_external_effects(job_id, created_at, idempotency_key);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_external_effects_logical_slot
+  ON agent_external_effects(job_id, logical_slot);
+
+CREATE INDEX IF NOT EXISTS idx_agent_external_effects_status
+  ON agent_external_effects(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS agent_external_effect_events (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  idempotency_key TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (
+    status IN ('prepared', 'submitting', 'applied', 'failed', 'unknown')
+  ),
+  detail_json TEXT,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (idempotency_key)
+    REFERENCES agent_external_effects(idempotency_key)
+    ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_external_effect_events_effect
+  ON agent_external_effect_events(idempotency_key, sequence);
+
+CREATE TABLE IF NOT EXISTS agent_freshness_results (
+  job_id TEXT NOT NULL,
+  result_key TEXT NOT NULL,
+  deadline_at INTEGER NOT NULL,
+  produced_at INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('fresh', 'revalidated', 'stale')),
+  result_json TEXT,
+  checked_at INTEGER NOT NULL,
+  PRIMARY KEY (job_id, result_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_freshness_results_status
+  ON agent_freshness_results(status, checked_at);
+
 CREATE TABLE IF NOT EXISTS exec_approvals_config (
   config_key TEXT NOT NULL PRIMARY KEY,
   raw_json TEXT NOT NULL,
@@ -290,6 +359,17 @@ CREATE TABLE IF NOT EXISTS device_auth_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_device_auth_tokens_updated
   ON device_auth_tokens(updated_at_ms DESC, device_id, role);
+
+CREATE TABLE IF NOT EXISTS talk_client_sessions (
+  device_id TEXT NOT NULL PRIMARY KEY,
+  conn_id TEXT NOT NULL,
+  session_key TEXT,
+  expires_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_talk_client_sessions_expires
+  ON talk_client_sessions(expires_at_ms, device_id);
 
 CREATE TABLE IF NOT EXISTS android_notification_recent_packages (
   package_name TEXT NOT NULL PRIMARY KEY,
@@ -711,6 +791,15 @@ CREATE TABLE IF NOT EXISTS agent_databases (
   size_bytes INTEGER,
   PRIMARY KEY (agent_id, path)
 );
+
+CREATE TABLE IF NOT EXISTS agent_database_leases (
+  lease_id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  owner_pid INTEGER NOT NULL,
+  owner_start_time INTEGER,
+  opened_at INTEGER NOT NULL
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS plugin_state_entries (
   plugin_id TEXT NOT NULL,
@@ -1274,6 +1363,92 @@ CREATE TABLE IF NOT EXISTS task_delivery_state (
   last_notified_event_at INTEGER,
   FOREIGN KEY (task_id) REFERENCES task_runs(task_id) ON DELETE CASCADE
 );
+
+-- Linux-owned durable job control plane. Workers access these rows only through
+-- the versioned jobd protocol; the SQLite file must never be network-mounted.
+CREATE TABLE IF NOT EXISTS jobd_jobs (
+  job_id TEXT NOT NULL PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  capability TEXT NOT NULL,
+  priority_rank INTEGER NOT NULL,
+  payload_json TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  delivery_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (
+    status IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled')
+  ),
+  fencing_token INTEGER NOT NULL DEFAULT 0,
+  worker_id TEXT,
+  lease_expires_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  started_at INTEGER,
+  ended_at INTEGER,
+  terminal_summary TEXT,
+  terminal_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobd_jobs_lease
+  ON jobd_jobs(status, priority_rank, lease_expires_at, created_at, job_id);
+CREATE INDEX IF NOT EXISTS idx_jobd_jobs_worker
+  ON jobd_jobs(worker_id, lease_expires_at, job_id);
+
+CREATE TABLE IF NOT EXISTS jobd_job_events (
+  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  fencing_token INTEGER NOT NULL,
+  worker_id TEXT,
+  detail TEXT,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (job_id) REFERENCES jobd_jobs(job_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobd_job_events_job
+  ON jobd_job_events(job_id, event_id);
+
+CREATE TABLE IF NOT EXISTS jobd_effects (
+  idempotency_key TEXT NOT NULL PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  logical_slot TEXT NOT NULL,
+  effect_kind TEXT NOT NULL,
+  resource_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (
+    status IN ('prepared', 'submitting', 'applied', 'failed', 'unknown')
+  ),
+  claim_fencing_token INTEGER,
+  receipt_json TEXT,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (job_id, logical_slot, effect_kind),
+  FOREIGN KEY (job_id) REFERENCES jobd_jobs(job_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobd_effects_job_status
+  ON jobd_effects(job_id, status, created_at, idempotency_key);
+
+CREATE TABLE IF NOT EXISTS jobd_outbox (
+  outbox_id TEXT NOT NULL PRIMARY KEY,
+  job_id TEXT NOT NULL UNIQUE,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'delivered', 'unknown')),
+  fencing_token INTEGER NOT NULL DEFAULT 0,
+  worker_id TEXT,
+  lease_expires_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  delivered_at INTEGER,
+  receipt_json TEXT,
+  last_error TEXT,
+  FOREIGN KEY (job_id) REFERENCES jobd_jobs(job_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobd_outbox_lease
+  ON jobd_outbox(status, lease_expires_at, created_at, outbox_id);
 
 CREATE TABLE IF NOT EXISTS flow_runs (
   flow_id TEXT NOT NULL PRIMARY KEY,

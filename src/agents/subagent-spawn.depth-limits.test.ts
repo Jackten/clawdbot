@@ -13,6 +13,7 @@ const hoisted = vi.hoisted(() => ({
   callGatewayMock: vi.fn(),
   configOverride: {} as Record<string, unknown>,
   depthBySession: new Map<string, number>(),
+  registerAgentRunAdmissionOverrideMock: vi.fn(() => () => undefined),
   updateSessionStoreMock: vi.fn(),
   registerSubagentRunMock: vi.fn(),
 }));
@@ -78,6 +79,7 @@ describe("subagent spawn depth + child limits", () => {
       callGatewayMock: hoisted.callGatewayMock,
       getRuntimeConfig: () => hoisted.configOverride,
       registerSubagentRunMock: hoisted.registerSubagentRunMock,
+      registerAgentRunAdmissionOverrideMock: hoisted.registerAgentRunAdmissionOverrideMock,
       updateSessionStoreMock: hoisted.updateSessionStoreMock,
       getSubagentDepthFromSessionStore: (sessionKey) => hoisted.depthBySession.get(sessionKey) ?? 0,
       countActiveRunsForSession: (sessionKey) =>
@@ -91,6 +93,7 @@ describe("subagent spawn depth + child limits", () => {
     hoisted.depthBySession.clear();
     hoisted.callGatewayMock.mockClear();
     hoisted.registerSubagentRunMock.mockClear();
+    hoisted.registerAgentRunAdmissionOverrideMock.mockClear();
     hoisted.updateSessionStoreMock.mockReset();
     persistedStore = undefined;
     installSessionStoreCaptureMock(hoisted.updateSessionStoreMock, {
@@ -185,6 +188,55 @@ describe("subagent spawn depth + child limits", () => {
       result,
       "sessions_spawn has reached max active children for this session (1/1)",
     );
+  });
+
+  it("atomically rejects the N+1th concurrent child and governs the admitted child", async () => {
+    hoisted.configOverride = createDepthLimitConfig({
+      maxSpawnDepth: 2,
+      maxChildrenPerAgent: 1,
+    });
+    let admitFirstChild!: () => void;
+    const firstChildAdmission = new Promise<void>((resolve) => {
+      admitFirstChild = resolve;
+    });
+    hoisted.callGatewayMock.mockImplementation(
+      async (opts: { method?: string; params?: { idempotencyKey?: string } }) => {
+        if (opts.method !== "agent") {
+          return {};
+        }
+        await firstChildAdmission;
+        return { runId: "run-governed" };
+      },
+    );
+
+    const firstSpawn = spawnFrom("agent:main:subagent:parent");
+    await vi.waitFor(() => {
+      expect(
+        hoisted.callGatewayMock.mock.calls.some(
+          (call) => (call[0] as { method?: string }).method === "agent",
+        ),
+      ).toBe(true);
+    });
+
+    const rejected = await spawnFrom("agent:main:subagent:parent");
+    expectForbidden(
+      rejected,
+      "sessions_spawn has reached max active children for this session (1/1)",
+    );
+
+    const agentCall = hoisted.callGatewayMock.mock.calls.find(
+      (call) => (call[0] as { method?: string }).method === "agent",
+    )?.[0] as { params?: { idempotencyKey?: string } };
+    expect(hoisted.registerAgentRunAdmissionOverrideMock).toHaveBeenCalledWith(
+      agentCall.params?.idempotencyKey,
+      expect.objectContaining({
+        priority: "background",
+        jobId: `task:${agentCall.params?.idempotencyKey}`,
+      }),
+    );
+
+    admitFirstChild();
+    expectAccepted(await firstSpawn, "run-governed");
   });
 
   it("does not use subagent maxConcurrent as a per-parent spawn gate", async () => {

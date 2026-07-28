@@ -8,6 +8,8 @@ import { CommandLane } from "../process/lanes.js";
 
 export function applyGatewayLaneConcurrency(cfg: OpenClawConfig) {
   const cronMaxConcurrentRuns = resolveCronMaxConcurrentRuns(cfg.cron);
+  // Stage 2 owns exactly one background worker beside the foreground lane.
+  setCommandLaneConcurrency(CommandLane.Background, 1);
   setCommandLaneConcurrency(CommandLane.Cron, cronMaxConcurrentRuns);
   // Cron isolated agent turns remap inner LLM work to this lane.
   setCommandLaneConcurrency(CommandLane.CronNested, cronMaxConcurrentRuns);

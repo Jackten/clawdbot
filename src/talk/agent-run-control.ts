@@ -10,7 +10,18 @@ import {
   queueEmbeddedAgentMessageWithOutcomeAsync,
   resolveActiveEmbeddedRunSessionId,
 } from "../agents/embedded-agent-runner/runs.js";
+import { getRuntimeConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { getDiagnosticSessionActivitySnapshot } from "../logging/diagnostic-run-activity.js";
+import {
+  cancelTaskById,
+  getTaskById,
+  listTasksForOwnerKey,
+  listTasksForRelatedSessionKey,
+} from "../tasks/runtime-internal.js";
+import { resolveTaskForLookupTokenForOwner } from "../tasks/task-owner-access.js";
+import type { TaskRecord } from "../tasks/task-registry.types.js";
+import { formatTaskStatusDetail, formatTaskStatusTitle } from "../tasks/task-status.js";
 import {
   buildRealtimeVoiceAgentCancelProviderResult,
   buildRealtimeVoiceAgentFollowupSteeringText,
@@ -52,6 +63,11 @@ type RealtimeVoiceAgentControlDeps = {
     sessionKey?: string;
   }) => RealtimeVoiceAgentRunActivity;
   resolveActiveEmbeddedRunSessionId: (sessionKey: string) => string | undefined;
+  cancelTaskById?: typeof cancelTaskById;
+  getTaskById?: typeof getTaskById;
+  listTasksForOwnerKey?: typeof listTasksForOwnerKey;
+  listTasksForRelatedSessionKey?: typeof listTasksForRelatedSessionKey;
+  resolveTaskForLookupTokenForOwner?: typeof resolveTaskForLookupTokenForOwner;
 };
 
 const defaultDeps: RealtimeVoiceAgentControlDeps = {
@@ -59,7 +75,67 @@ const defaultDeps: RealtimeVoiceAgentControlDeps = {
   getDiagnosticSessionActivitySnapshot,
   queueEmbeddedAgentMessageWithOutcomeAsync,
   resolveActiveEmbeddedRunSessionId,
+  cancelTaskById,
+  getTaskById,
+  listTasksForOwnerKey,
+  listTasksForRelatedSessionKey,
+  resolveTaskForLookupTokenForOwner,
 };
+
+function isActiveTask(task: TaskRecord): boolean {
+  return task.status === "queued" || task.status === "running";
+}
+
+function isChildVoiceConsultTask(task: TaskRecord | undefined, sessionKey: string): boolean {
+  return (
+    task?.scopeKind === "session" &&
+    task.taskKind === "agent_consult" &&
+    task.childSessionKey?.trim() === sessionKey
+  );
+}
+
+function isOwnedActiveVoiceConsultTask(task: TaskRecord, ownerKey: string): boolean {
+  return (
+    isActiveTask(task) &&
+    task.scopeKind === "session" &&
+    task.taskKind === "agent_consult" &&
+    task.ownerKey?.trim() === ownerKey &&
+    Boolean(task.childSessionKey?.trim())
+  );
+}
+
+function formatVoiceTaskStatus(task: TaskRecord): string {
+  const detail = formatTaskStatusDetail(task);
+  return `${formatTaskStatusTitle(task)} is ${task.status}${detail ? `: ${detail}` : ""}. Job ${task.taskId}.`;
+}
+
+function buildTaskControlResult(params: {
+  task: TaskRecord;
+  mode: RealtimeVoiceAgentControlResult["mode"];
+  sessionKey: string;
+  ok: boolean;
+  message: string;
+  aborted?: boolean;
+  reason?: string;
+}): RealtimeVoiceAgentControlResult {
+  return {
+    ok: params.ok,
+    mode: params.mode,
+    sessionKey: params.sessionKey,
+    active: isActiveTask(params.task),
+    target: "task",
+    jobId: params.task.taskId,
+    ...(params.aborted === undefined ? {} : { aborted: params.aborted }),
+    ...(params.reason ? { reason: params.reason } : {}),
+    message: params.message,
+    speak: true,
+    show: true,
+    suppress: false,
+    ...(params.mode === "cancel" && params.aborted
+      ? { providerResult: buildRealtimeVoiceAgentCancelProviderResult(params.message) }
+      : {}),
+  };
+}
 
 /** Apply a spoken status, cancel, steer, or follow-up request to an active run. */
 export async function controlRealtimeVoiceAgentRun(
@@ -67,6 +143,8 @@ export async function controlRealtimeVoiceAgentRun(
     sessionKey: string;
     text: string;
     mode?: unknown;
+    jobId?: string;
+    cfg?: OpenClawConfig;
     recentEvents?: readonly TalkEvent[];
   },
   deps: RealtimeVoiceAgentControlDeps = defaultDeps,
@@ -75,24 +153,138 @@ export async function controlRealtimeVoiceAgentRun(
   const text = params.text.trim();
   const intent = resolveRealtimeVoiceAgentControlIntent({ text, mode: params.mode });
   const mode = intent.mode;
-  const sessionId = deps.resolveActiveEmbeddedRunSessionId(sessionKey);
-  const activity = deps.getDiagnosticSessionActivitySnapshot({ sessionId, sessionKey });
-  const active = Boolean(sessionId || activity.activeWorkKind || activity.hasActiveEmbeddedRun);
+  const jobId = params.jobId?.trim();
+  const resolveTask =
+    deps.resolveTaskForLookupTokenForOwner ?? defaultDeps.resolveTaskForLookupTokenForOwner;
+  const listTasks = deps.listTasksForOwnerKey ?? defaultDeps.listTasksForOwnerKey;
+  const listRelatedTasks =
+    deps.listTasksForRelatedSessionKey ?? defaultDeps.listTasksForRelatedSessionKey;
+  const readTask = deps.getTaskById ?? defaultDeps.getTaskById;
+  const cancelTask = deps.cancelTaskById ?? defaultDeps.cancelTaskById;
+  const ownerTasks = listTasks?.(sessionKey) ?? [];
+  const implicitConsultTask = jobId
+    ? undefined
+    : ownerTasks.find((task) => isOwnedActiveVoiceConsultTask(task, sessionKey));
+  const ownerTask = jobId ? resolveTask?.({ token: jobId, callerOwnerKey: sessionKey }) : undefined;
+  const childTask = jobId && !ownerTask ? readTask?.(jobId) : undefined;
+  const requestedTask =
+    ownerTask ??
+    (isChildVoiceConsultTask(childTask, sessionKey) ? childTask : undefined) ??
+    (mode === "cancel" ? implicitConsultTask : undefined);
+
+  if (jobId && !requestedTask) {
+    return {
+      ok: false,
+      mode,
+      sessionKey,
+      active: false,
+      ...(mode === "cancel" ? { aborted: false } : {}),
+      target: "task",
+      jobId,
+      reason: "task_not_found",
+      message: `I couldn't find job ${jobId} in this session.`,
+      speak: true,
+      show: true,
+      suppress: false,
+    };
+  }
+  if (requestedTask && mode === "status") {
+    return buildTaskControlResult({
+      task: requestedTask,
+      mode,
+      sessionKey,
+      ok: true,
+      message: formatVoiceTaskStatus(requestedTask),
+    });
+  }
+  if (requestedTask && mode === "cancel") {
+    if (!cancelTask) {
+      return buildTaskControlResult({
+        task: requestedTask,
+        mode,
+        sessionKey,
+        ok: false,
+        aborted: false,
+        reason: "task_cancel_unavailable",
+        message: `Job ${requestedTask.taskId} cannot be cancelled from this voice surface.`,
+      });
+    }
+    const cancelled = await cancelTask({
+      cfg: params.cfg ?? getRuntimeConfig(),
+      taskId: requestedTask.taskId,
+      reason: "Cancelled by voice request.",
+    });
+    return buildTaskControlResult({
+      task: cancelled.task ?? requestedTask,
+      mode,
+      sessionKey,
+      ok: cancelled.cancelled,
+      aborted: cancelled.cancelled,
+      ...(cancelled.cancelled ? {} : { reason: cancelled.reason ?? "abort_rejected" }),
+      message: cancelled.cancelled
+        ? `Cancelled ${formatTaskStatusTitle(requestedTask)}. Job ${requestedTask.taskId}.`
+        : (cancelled.reason ?? `Could not cancel job ${requestedTask.taskId}.`),
+    });
+  }
+  if (requestedTask) {
+    return buildTaskControlResult({
+      task: requestedTask,
+      mode,
+      sessionKey,
+      ok: false,
+      reason: "task_control_mode_unsupported",
+      message: `Job ${requestedTask.taskId} supports status and cancel controls only.`,
+    });
+  }
+  // Talk consults execute in snapshot-forked worker sessions. Legacy spoken
+  // controls do not carry a job id, so route them through the newest active
+  // consult owned by this Talk session instead of missing the worker run.
+  const activeRunSessionKey = implicitConsultTask?.childSessionKey?.trim() || sessionKey;
+  const sessionId = deps.resolveActiveEmbeddedRunSessionId(activeRunSessionKey);
+  const activity = deps.getDiagnosticSessionActivitySnapshot({
+    sessionId,
+    sessionKey: activeRunSessionKey,
+  });
+  const activeTasks =
+    mode === "status"
+      ? [
+          ...ownerTasks,
+          ...(listRelatedTasks?.(sessionKey) ?? []).filter((task) =>
+            isChildVoiceConsultTask(task, sessionKey),
+          ),
+        ].filter(
+          (task, index, tasks) =>
+            isActiveTask(task) &&
+            tasks.findIndex((candidate) => candidate.taskId === task.taskId) === index,
+        )
+      : [];
+  const active = Boolean(
+    activeTasks.length > 0 || sessionId || activity.activeWorkKind || activity.hasActiveEmbeddedRun,
+  );
 
   // Status is read-only and can answer from diagnostic activity even when the
   // active embedded run id has already disappeared.
   if (mode === "status") {
+    const taskMessage =
+      activeTasks.length > 0
+        ? activeTasks
+            .slice(0, 3)
+            .map((task) => formatVoiceTaskStatus(task))
+            .join(" ")
+        : undefined;
     return {
       ok: true,
       mode,
       sessionKey,
       ...(sessionId ? { sessionId } : {}),
       active,
-      message: formatRealtimeVoiceAgentStatus({
-        active,
-        recentEvents: params.recentEvents,
-        activity,
-      }),
+      message:
+        taskMessage ??
+        formatRealtimeVoiceAgentStatus({
+          active,
+          recentEvents: params.recentEvents,
+          activity,
+        }),
       speak: true,
       show: true,
       suppress: false,

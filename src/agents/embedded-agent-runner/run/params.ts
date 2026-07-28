@@ -20,6 +20,7 @@ import type { CommandQueueEnqueueFn } from "../../../process/command-queue.types
 import type { InputProvenance } from "../../../sessions/input-provenance.js";
 import type { UserTurnTranscriptRecorder } from "../../../sessions/user-turn-transcript.types.js";
 import type { SkillSnapshot } from "../../../skills/types.js";
+import type { AgentRunAdmissionOptions } from "../../agent-run-admission.js";
 import type { ExecElevatedDefaults, ExecToolDefaults } from "../../bash-tools.exec-types.js";
 import type { BootstrapContextRunKind } from "../../bootstrap-mode.js";
 import type { AgentStreamParams, ClientToolDefinition } from "../../command/shared-types.js";
@@ -75,6 +76,8 @@ export type RunEmbeddedAgentParams = {
   agentAccountId?: string;
   /** What initiated this agent run: "user", "heartbeat", "cron", "memory", "overflow", or "manual". */
   trigger?: EmbeddedRunTrigger;
+  /** Internal bounded-concurrency priority, resource scope, and queue observers. */
+  admission?: AgentRunAdmissionOptions;
   /** Stable cron job identifier populated for cron-triggered runs. */
   jobId?: string;
   /** Relative workspace path that memory-triggered writes are allowed to append to. */

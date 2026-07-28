@@ -54,6 +54,7 @@ describe("talk normalization", () => {
         reasoningEffort: " low ",
         brain: "agent-consult",
         consultRouting: "force-agent-consult",
+        allowImageInput: true,
         clientTools: [
           {
             name: " phone_vibrate ",
@@ -104,6 +105,7 @@ describe("talk normalization", () => {
         reasoningEffort: "low",
         brain: "agent-consult",
         consultRouting: "force-agent-consult",
+        allowImageInput: true,
         clientTools: [
           {
             name: "phone_vibrate",

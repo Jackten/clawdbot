@@ -1223,6 +1223,7 @@ export class DiscordRealtimeVoiceSession implements VoiceRealtimeSession {
         sessionKey: this.params.entry.route.sessionKey,
         text: parsed.text,
         mode: parsed.mode,
+        ...(parsed.jobId ? { jobId: parsed.jobId } : {}),
       });
       this.logAgentControlResult(result);
       session.submitToolResult(callId, result);

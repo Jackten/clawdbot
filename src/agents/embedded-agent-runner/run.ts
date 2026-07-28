@@ -42,6 +42,7 @@ import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { resolveProviderAuthProfileId } from "../../plugins/provider-runtime.js";
 import { enqueueCommandInLane, getCommandLaneSnapshot } from "../../process/command-queue.js";
 import type { CommandQueueEnqueueOptions } from "../../process/command-queue.types.js";
+import { CommandLane } from "../../process/lanes.js";
 import { createAgentHarnessTaskRuntimeScope } from "../../tasks/agent-harness-task-runtime-scope.js";
 import { resolveUserPath } from "../../utils.js";
 import { isMarkdownCapableMessageChannel } from "../../utils/message-channel.js";
@@ -49,6 +50,13 @@ import {
   retireSessionMcpRuntime,
   retireSessionMcpRuntimeForSessionKey,
 } from "../agent-bundle-mcp-tools.js";
+import { runWithAgentMutationJob } from "../agent-mutation-coordinator.js";
+import {
+  bindAgentRunAdmissionContext,
+  resolveAgentRunAdmission,
+  runWithAgentProviderAdmission,
+  runWithAgentWorkerAdmission,
+} from "../agent-run-admission.js";
 import {
   resolveAgentDir,
   resolveSessionAgentIds,
@@ -666,8 +674,26 @@ async function runEmbeddedAgentInternal(
     sessionKey: normalizeOptionalString(effectiveSessionKey ?? runSessionTarget.sessionKey),
     sessionFile: runSessionTarget.sessionFile,
   };
+  const admission = resolveAgentRunAdmission({
+    runId: params.runId,
+    trigger: params.trigger,
+    lane: params.lane,
+    request: params.transcriptPrompt ?? params.prompt,
+    messageTo: params.messageTo,
+    messageThreadId: params.messageThreadId,
+    explicit: params.admission,
+  });
   const sessionLane = resolveSessionLane(params.sessionKey?.trim() || params.sessionId);
-  const globalLane = resolveGlobalLane(params.lane);
+  const requestedGlobalLane = resolveGlobalLane(params.lane);
+  // Existing cron/subagent/nested lanes retain their configured concurrency.
+  // Only main-lane background work consumes the new single background worker.
+  const workerSlot =
+    requestedGlobalLane !== CommandLane.Main
+      ? "existing"
+      : admission.priority === "foreground"
+        ? "foreground"
+        : "background";
+  const globalLane = workerSlot === "background" ? CommandLane.Background : requestedGlobalLane;
   // Outer fallback attempts defer session suspension only while another
   // candidate remains. Direct and final-candidate runs suspend normally.
   const failureSuspension = resolveSessionSuspensionTarget();
@@ -793,6 +819,32 @@ async function runEmbeddedAgentInternal(
     noteLaneWaitIfBusy(sessionLane);
     return enqueueCommandInLane(sessionLane, taskWithLaneAdmission, withRunLaneWait(sessionOpts));
   };
+  const enqueueAdmittedGlobal = <T>(task: () => Promise<T>) =>
+    runWithAgentWorkerAdmission(
+      {
+        runId: params.runId,
+        priority: admission.priority,
+        workerSlot,
+        resourceScope: admission.resourceScope,
+        onQueueReason: admission.onQueueReason,
+        onAdmitted: admission.onAdmitted,
+        abortSignal: params.abortSignal,
+      },
+      () =>
+        enqueueGlobal(
+          bindAgentRunAdmissionContext(() =>
+            runWithAgentMutationJob(
+              {
+                jobId: admission.jobId ?? params.jobId ?? params.runId,
+                runId: params.runId,
+                resourceScope: admission.resourceScope,
+                freshnessDeadlineAtMs: admission.freshnessDeadlineAtMs,
+              },
+              task,
+            ),
+          ),
+        ),
+    );
   const channelHint = params.messageChannel ?? params.messageProvider;
   const resolvedToolResultFormat =
     params.toolResultFormat ??
@@ -812,7 +864,7 @@ async function runEmbeddedAgentInternal(
     // while this session waits on its own maintenance lane.
     await waitForDeferredTurnMaintenanceForSession(params.sessionKey);
     throwIfAborted();
-    return enqueueGlobal(async () => {
+    return enqueueAdmittedGlobal(async () => {
       throwIfAborted();
       const started = Date.now();
       const fastModeStarted = params.fastModeStartedAtMs ?? started;
@@ -2153,7 +2205,19 @@ async function runEmbeddedAgentInternal(
             runLoopIterations,
             maxRunLoopIterations: MAX_RUN_LOOP_ITERATIONS,
           });
-          const rawAttempt = await runEmbeddedAttemptWithBackend({
+          const runAdmittedAttempt = (
+            attemptParams: Parameters<typeof runEmbeddedAttemptWithBackend>[0],
+          ) =>
+            runWithAgentProviderAdmission(
+              {
+                provider,
+                priority: admission.priority,
+                onQueueReason: admission.onQueueReason,
+                abortSignal: attemptAbortController.signal,
+              },
+              () => runEmbeddedAttemptWithBackend(attemptParams),
+            );
+          const rawAttempt = await runAdmittedAttempt({
             sessionId: activeSessionId,
             sessionKey: resolvedSessionKey,
             promptCacheKey: params.promptCacheKey,

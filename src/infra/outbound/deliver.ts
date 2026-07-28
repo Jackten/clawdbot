@@ -66,6 +66,7 @@ import {
 } from "./delivery-commit-hooks.js";
 import {
   ackDelivery,
+  completeDelivery,
   enqueueDelivery,
   failDelivery,
   failDeliveryAfterPlatformSend,
@@ -690,6 +691,7 @@ async function persistQueuedPreSendState(params: {
 async function persistQueuedPostSendState(params: {
   queueId: string;
   queuePolicy: OutboundDeliveryQueuePolicy;
+  results: readonly OutboundDeliveryResult[];
 }): Promise<QueuedPostSendState> {
   try {
     await markDeliveryPlatformOutcomeUnknown(params.queueId);
@@ -701,7 +703,7 @@ async function persistQueuedPostSendState(params: {
     try {
       // The platform already returned a result. If state marking is unavailable,
       // deleting the intent is safer than leaving it replayable.
-      await ackDelivery(params.queueId);
+      await completeDelivery(params.queueId, params.results);
       return "acked";
     } catch (ackErr: unknown) {
       const error = `post-send state persistence failed: marker=${formatErrorMessage(markErr)}; ack=${formatErrorMessage(ackErr)}`;
@@ -1354,6 +1356,7 @@ export async function deliverOutboundPayloadsInternal(
   const queueId = params.skipQueue
     ? null
     : await enqueueDelivery({
+        ...(params.deliveryQueueId ? { id: params.deliveryQueueId } : {}),
         channel,
         to,
         accountId: params.accountId,
@@ -1374,6 +1377,7 @@ export async function deliverOutboundPayloadsInternal(
         mirror: params.mirror,
         session: params.session,
         gatewayClientScopes: params.gatewayClientScopes,
+        retainSentReceipt: params.deliveryQueueId !== undefined,
       }).catch((err: unknown) => {
         if (queuePolicy === "required") {
           throw err;
@@ -1492,7 +1496,11 @@ async function deliverOutboundPayloadsWithQueueCleanup(
     onDeliveryResult: async (result) => {
       deliveredResults.push(result);
       if (queueId && queuedPostSendState === undefined) {
-        queuedPostSendState = await persistQueuedPostSendState({ queueId, queuePolicy });
+        queuedPostSendState = await persistQueuedPostSendState({
+          queueId,
+          queuePolicy,
+          results: deliveredResults,
+        });
       }
       await params.onDeliveryResult?.(result);
     },
@@ -1518,7 +1526,11 @@ async function deliverOutboundPayloadsWithQueueCleanup(
         const postSendState =
           queuedPostSendState ??
           (partialSendEvidence
-            ? await persistQueuedPostSendState({ queueId, queuePolicy })
+            ? await persistQueuedPostSendState({
+                queueId,
+                queuePolicy,
+                results: deliveredResults,
+              })
             : undefined);
         const error = "partial delivery failure (bestEffort)";
         if (postSendState === undefined || postSendState === "marked") {
@@ -1540,7 +1552,11 @@ async function deliverOutboundPayloadsWithQueueCleanup(
         const postSendState =
           queuedPostSendState ??
           (results.length > 0 || queuedPreSendState === "marked"
-            ? await persistQueuedPostSendState({ queueId, queuePolicy })
+            ? await persistQueuedPostSendState({
+                queueId,
+                queuePolicy,
+                results: deliveredResults,
+              })
             : queuedPreSendState === "acked"
               ? "acked"
               : undefined);
@@ -1549,7 +1565,7 @@ async function deliverOutboundPayloadsWithQueueCleanup(
             ? true
             : postSendState === "failed"
               ? false
-              : await ackDelivery(queueId)
+              : await completeDelivery(queueId, deliveredResults)
                   .then(() => true)
                   .catch(async (err: unknown) => {
                     const hasSendEvidence =
@@ -1605,6 +1621,7 @@ async function deliverOutboundPayloadsWithQueueCleanup(
             queuedPostSendState ??= await persistQueuedPostSendState({
               queueId,
               queuePolicy,
+              results: deliveredResults,
             });
             if (queuedPostSendState === "marked") {
               await failDeliveryAfterPlatformSend(queueId, formatErrorMessage(err));

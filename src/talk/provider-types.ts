@@ -59,6 +59,13 @@ export type RealtimeVoiceToolResultOptions = {
   willContinue?: boolean;
 };
 
+/** One bounded image item attached to a live realtime conversation. */
+export type RealtimeVoiceImageInput = {
+  imageBase64: string;
+  mimeType: "image/jpeg";
+  note?: string;
+};
+
 export type RealtimeVoiceBridgeEvent = {
   direction: "client" | "server";
   type: string;
@@ -192,6 +199,7 @@ export type RealtimeVoiceBridge = {
   sendAudio(audio: Buffer): void;
   setMediaTimestamp(ts: number): void;
   sendUserMessage?(text: string): void;
+  sendImage?(input: RealtimeVoiceImageInput): void;
   triggerGreeting?(instructions?: string): void;
   handleBargeIn?(options?: RealtimeVoiceBargeInOptions): void;
   submitToolResult(callId: string, result: unknown, options?: RealtimeVoiceToolResultOptions): void;

@@ -50,6 +50,16 @@ describe("OpenClawSchema talk validation", () => {
     expect(() => OpenClawSchema.parse({ talk: { realtime: { persistTranscript } } })).not.toThrow();
   });
 
+  it.each([true, false])("accepts talk.realtime.allowImageInput=%s", (allowImageInput) => {
+    expect(() => OpenClawSchema.parse({ talk: { realtime: { allowImageInput } } })).not.toThrow();
+  });
+
+  it("rejects a non-boolean talk.realtime.allowImageInput", () => {
+    expect(() => OpenClawSchema.parse({ talk: { realtime: { allowImageInput: "yes" } } })).toThrow(
+      /allowImageInput|boolean/i,
+    );
+  });
+
   it("rejects a non-boolean talk.realtime.persistTranscript", () => {
     expect(() =>
       OpenClawSchema.parse({ talk: { realtime: { persistTranscript: "yes" } } }),

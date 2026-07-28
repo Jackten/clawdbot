@@ -226,14 +226,43 @@ export const TalkClientToolCallParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
-/** Agent run identity returned after accepting a Talk client tool call. */
-export const TalkClientToolCallResultSchema = Type.Object(
+/** Durable receipt returned when an accepted Talk consult continues asynchronously. */
+export const TalkAgentConsultReceiptSchema = Type.Object(
   {
+    text: NonEmptyString,
+    status: Type.Literal("accepted"),
+    jobId: NonEmptyString,
     runId: NonEmptyString,
-    idempotencyKey: NonEmptyString,
+    title: NonEmptyString,
+    state: Type.Literal("running"),
   },
   { additionalProperties: false },
 );
+
+/** Result returned after executing a configured gateway tool synchronously. */
+const TalkGatewayToolCallResultSchema = Type.Object(
+  {
+    result: Type.Union([
+      Type.Object({ response: Type.String() }, { additionalProperties: false }),
+      Type.Object({ error: Type.String() }, { additionalProperties: false }),
+    ]),
+  },
+  { additionalProperties: false },
+);
+
+/** Agent-run acceptance or synchronous gateway-tool result from a Talk client tool call. */
+export const TalkClientToolCallResultSchema = Type.Union([
+  Type.Object(
+    {
+      runId: NonEmptyString,
+      idempotencyKey: NonEmptyString,
+      sessionKey: Type.Optional(NonEmptyString),
+      receipt: Type.Optional(TalkAgentConsultReceiptSchema),
+    },
+    { additionalProperties: false },
+  ),
+  TalkGatewayToolCallResultSchema,
+]);
 
 /** Text steering request for a Talk session bound to an agent turn. */
 export const TalkClientSteerParamsSchema = Type.Object(
@@ -241,6 +270,7 @@ export const TalkClientSteerParamsSchema = Type.Object(
     sessionKey: NonEmptyString,
     text: NonEmptyString,
     mode: Type.Optional(TalkAgentControlModeSchema),
+    jobId: Type.Optional(NonEmptyString),
   },
   { additionalProperties: false },
 );
@@ -255,7 +285,10 @@ export const TalkAgentControlResultSchema = Type.Object(
     active: Type.Boolean(),
     queued: Type.Optional(Type.Boolean()),
     aborted: Type.Optional(Type.Boolean()),
-    target: Type.Optional(Type.Union([Type.Literal("embedded_run"), Type.Literal("reply_run")])),
+    target: Type.Optional(
+      Type.Union([Type.Literal("embedded_run"), Type.Literal("reply_run"), Type.Literal("task")]),
+    ),
+    jobId: Type.Optional(NonEmptyString),
     reason: Type.Optional(Type.String()),
     message: Type.String(),
     speak: Type.Boolean(),
@@ -315,6 +348,17 @@ export const TalkSessionAppendAudioParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** Attaches one JPEG image to an active Gateway-relayed realtime session. */
+export const TalkSessionAttachImageParamsSchema = Type.Object(
+  {
+    sessionId: NonEmptyString,
+    imageBase64: Type.String({ minLength: 1, maxLength: 699_052 }),
+    mimeType: Type.Literal("image/jpeg"),
+    note: Type.Optional(Type.String({ maxLength: 1_024 })),
+  },
+  { additionalProperties: false },
+);
+
 /** Starts or advances a Talk turn within a session. */
 export const TalkSessionTurnParamsSchema = Type.Object(
   {
@@ -370,6 +414,7 @@ export const TalkSessionSteerParamsSchema = Type.Object(
     sessionKey: Type.Optional(NonEmptyString),
     text: NonEmptyString,
     mode: Type.Optional(TalkAgentControlModeSchema),
+    jobId: Type.Optional(NonEmptyString),
   },
   { additionalProperties: false },
 );
@@ -668,6 +713,7 @@ const TalkRealtimeConfigSchema = Type.Object(
     consultRouting: Type.Optional(
       Type.Union([Type.Literal("provider-direct"), Type.Literal("force-agent-consult")]),
     ),
+    allowImageInput: Type.Optional(Type.Boolean()),
     clientTools: Type.Optional(Type.Array(TalkRealtimeClientToolSchema)),
     gatewayTools: Type.Optional(Type.Array(TalkRealtimeGatewayToolSchema)),
   },

@@ -9,12 +9,15 @@ import {
   deleteDeliveryQueueEntry,
   loadDeliveryQueueEntries,
   loadDeliveryQueueEntry,
+  loadSentDeliveryQueueEntry,
+  markDeliveryQueueEntrySent,
   moveDeliveryQueueEntryToFailed,
   updateDeliveryQueueEntry,
   upsertDeliveryQueueEntry,
   type DeliveryQueueRowMetadata,
 } from "../delivery-queue-sqlite.js";
 import { generateSecureUuid } from "../secure-random.js";
+import type { OutboundDeliveryResult } from "./deliver-types.js";
 import type { OutboundDeliveryFormattingOptions } from "./formatting.js";
 import type { OutboundIdentity } from "./identity.js";
 import type { OutboundMirror } from "./mirror.js";
@@ -74,6 +77,8 @@ export type QueuedDeliveryPayload = {
   session?: OutboundSessionContext;
   /** Gateway caller scopes at enqueue time, preserved for recovery replay. */
   gatewayClientScopes?: readonly string[];
+  /** Keep a terminal transport receipt for a linked external-effect ledger. */
+  retainSentReceipt?: boolean;
 };
 
 export interface QueuedDelivery extends QueuedDeliveryPayload {
@@ -86,6 +91,7 @@ export interface QueuedDelivery extends QueuedDeliveryPayload {
   /** Canonical reply target after hooks; null records an intentional root send. */
   effectiveReplyToId?: string | null;
   recoveryState?: "send_attempt_started" | "unknown_after_send";
+  sentResults?: OutboundDeliveryResult[];
 }
 
 function queuedDeliveryMetadata(entry: QueuedDelivery): DeliveryQueueRowMetadata {
@@ -100,10 +106,10 @@ function queuedDeliveryMetadata(entry: QueuedDelivery): DeliveryQueueRowMetadata
 
 /** Persist a delivery entry before attempting send. Returns the entry ID. */
 export async function enqueueDelivery(
-  params: QueuedDeliveryPayload,
+  params: QueuedDeliveryPayload & { id?: string },
   stateDir?: string,
 ): Promise<string> {
-  const id = generateSecureUuid();
+  const id = params.id ?? generateSecureUuid();
   const entry: QueuedDelivery = {
     id,
     enqueuedAt: Date.now(),
@@ -127,6 +133,7 @@ export async function enqueueDelivery(
     mirror: params.mirror,
     session: params.session,
     gatewayClientScopes: params.gatewayClientScopes,
+    retainSentReceipt: params.retainSentReceipt,
     retryCount: 0,
   };
   upsertDeliveryQueueEntry({
@@ -141,6 +148,23 @@ export async function enqueueDelivery(
 /** Remove a successfully delivered entry from the queue. */
 export async function ackDelivery(id: string, stateDir?: string): Promise<void> {
   deleteDeliveryQueueEntry(QUEUE_NAME, id, stateDir);
+}
+
+/** Remove a normal send or retain a terminal receipt for a linked effect ledger. */
+export async function completeDelivery(
+  id: string,
+  results: readonly OutboundDeliveryResult[],
+  stateDir?: string,
+): Promise<void> {
+  const entry = await loadPendingDelivery(id, stateDir);
+  if (!entry?.retainSentReceipt || results.length === 0) {
+    await ackDelivery(id, stateDir);
+    return;
+  }
+  markDeliveryQueueEntrySent(QUEUE_NAME, id, stateDir, (current) => ({
+    ...(current as QueuedDelivery),
+    sentResults: [...results],
+  }));
 }
 
 /** Update a queue entry after a failed delivery attempt. */
@@ -238,6 +262,14 @@ export async function loadPendingDelivery(
   stateDir?: string,
 ): Promise<QueuedDelivery | null> {
   return loadDeliveryQueueEntry(QUEUE_NAME, id, stateDir) as QueuedDelivery | null;
+}
+
+/** Load a retained terminal receipt by ID. */
+export async function loadSentDelivery(
+  id: string,
+  stateDir?: string,
+): Promise<QueuedDelivery | null> {
+  return loadSentDeliveryQueueEntry(QUEUE_NAME, id, stateDir) as QueuedDelivery | null;
 }
 
 /** Load all pending delivery entries from the queue. */

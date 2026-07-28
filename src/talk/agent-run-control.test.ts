@@ -1,5 +1,6 @@
 // Agent run control tests cover talk-driven agent pause and resume behavior.
 import { describe, expect, it, vi } from "vitest";
+import type { TaskRecord } from "../tasks/task-registry.types.js";
 import {
   classifyRealtimeVoiceAgentControlText,
   controlRealtimeVoiceAgentRun,
@@ -16,6 +17,11 @@ function createDeps(options: {
   abortResult?: boolean;
   activity?: RealtimeVoiceAgentRunActivity;
   reason?: "no_active_run" | "not_streaming" | "compacting" | "runtime_rejected";
+  tasks?: TaskRecord[];
+  relatedTasks?: TaskRecord[];
+  requestedTask?: TaskRecord;
+  rawTask?: TaskRecord;
+  cancelledTask?: TaskRecord;
 }) {
   return {
     abortEmbeddedAgentRun: vi.fn(() => options.abortResult ?? true),
@@ -38,6 +44,34 @@ function createDeps(options: {
     ),
     getDiagnosticSessionActivitySnapshot: vi.fn(() => options.activity ?? {}),
     resolveActiveEmbeddedRunSessionId: vi.fn(() => options.activeSessionId),
+    listTasksForOwnerKey: vi.fn(() => options.tasks ?? []),
+    listTasksForRelatedSessionKey: vi.fn(() => options.relatedTasks ?? []),
+    resolveTaskForLookupTokenForOwner: vi.fn(() => options.requestedTask),
+    getTaskById: vi.fn(() => options.rawTask),
+    cancelTaskById: vi.fn(async () => ({
+      found: Boolean(options.requestedTask ?? options.rawTask),
+      cancelled: Boolean(options.cancelledTask),
+      ...(options.cancelledTask ? { task: options.cancelledTask } : {}),
+    })),
+  };
+}
+
+function createTask(
+  overrides: Partial<TaskRecord> & Pick<TaskRecord, "taskId" | "status">,
+): TaskRecord {
+  return {
+    runtime: "cli",
+    taskKind: "agent_consult",
+    requesterSessionKey: "agent:main:main",
+    ownerKey: "agent:main:main",
+    scopeKind: "session",
+    task: "Finish the account audit",
+    createdAt: 1,
+    notifyPolicy: "done_only",
+    deliveryStatus: "pending",
+    ...overrides,
+    taskId: overrides.taskId,
+    status: overrides.status,
   };
 }
 
@@ -111,9 +145,9 @@ describe("classifyRealtimeVoiceAgentControlText", () => {
     });
     expect(
       parseRealtimeVoiceAgentControlToolArgs(
-        JSON.stringify({ text: "revísalo en español", mode: "steer" }),
+        JSON.stringify({ text: "check that job", mode: "status", jobId: "task-123" }),
       ),
-    ).toStrictEqual({ text: "revísalo en español", mode: "steer" });
+    ).toStrictEqual({ text: "check that job", mode: "status", jobId: "task-123" });
   });
 });
 
@@ -251,6 +285,158 @@ describe("controlRealtimeVoiceAgentRun", () => {
       message: "OpenClaw is running exec_command.",
     });
     expect(deps.queueEmbeddedAgentMessageWithOutcomeAsync).not.toHaveBeenCalled();
+  });
+
+  it("answers status from the durable task ledger with actionable job ids", async () => {
+    const task = createTask({
+      taskId: "task-123",
+      status: "running",
+      label: "Finish the account audit",
+      ownerKey: "agent:main:main",
+      childSessionKey: "agent:voice:call:123",
+    });
+    const deps = createDeps({ relatedTasks: [task] });
+
+    const result = await controlRealtimeVoiceAgentRun(
+      {
+        sessionKey: "agent:voice:call:123",
+        text: "what are you still working on?",
+        mode: "status",
+      },
+      deps,
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      active: true,
+      message: "Finish the account audit is running. Job task-123.",
+    });
+  });
+
+  it("cancels the exact durable job named by the voice tool", async () => {
+    const running = createTask({
+      taskId: "task-123",
+      status: "running",
+      label: "Finish the account audit",
+      ownerKey: "agent:main:main",
+      childSessionKey: "agent:voice:call:123",
+    });
+    const cancelled = createTask({
+      ...running,
+      taskId: "task-123",
+      status: "cancelled",
+      error: "Cancelled by voice request.",
+    });
+    const deps = createDeps({
+      rawTask: running,
+      cancelledTask: cancelled,
+    });
+
+    const result = await controlRealtimeVoiceAgentRun(
+      {
+        sessionKey: "agent:voice:call:123",
+        text: "cancel that audit",
+        mode: "cancel",
+        jobId: "task-123",
+        cfg: {},
+      },
+      deps,
+    );
+
+    expect(deps.cancelTaskById).toHaveBeenCalledWith({
+      cfg: {},
+      taskId: "task-123",
+      reason: "Cancelled by voice request.",
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      mode: "cancel",
+      target: "task",
+      jobId: "task-123",
+      active: false,
+      aborted: true,
+      message: "Cancelled Finish the account audit. Job task-123.",
+    });
+  });
+
+  it("routes no-job steering through the active consult worker session", async () => {
+    const running = createTask({
+      taskId: "task-implicit",
+      status: "running",
+      ownerKey: "agent:main:main",
+      childSessionKey: "agent:main:talk-job:worker",
+    });
+    const deps = createDeps({
+      tasks: [running],
+      activeSessionId: "worker-session-active",
+    });
+
+    const result = await controlRealtimeVoiceAgentRun(
+      {
+        sessionKey: "agent:main:main",
+        text: "use the safer plan",
+        mode: "steer",
+      },
+      deps,
+    );
+
+    expect(deps.resolveActiveEmbeddedRunSessionId).toHaveBeenCalledWith(
+      "agent:main:talk-job:worker",
+    );
+    expect(deps.queueEmbeddedAgentMessageWithOutcomeAsync).toHaveBeenCalledWith(
+      "worker-session-active",
+      "use the safer plan",
+      { steeringMode: "all", debounceMs: 0 },
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      mode: "steer",
+      sessionKey: "agent:main:main",
+      sessionId: "worker-session-active",
+      queued: true,
+    });
+  });
+
+  it("cancels the active consult task without requiring a job id", async () => {
+    const running = createTask({
+      taskId: "task-implicit",
+      status: "running",
+      ownerKey: "agent:main:main",
+      childSessionKey: "agent:main:talk-job:worker",
+    });
+    const cancelled = createTask({
+      ...running,
+      taskId: running.taskId,
+      status: "cancelled",
+      error: "Cancelled by voice request.",
+    });
+    const deps = createDeps({
+      tasks: [running],
+      cancelledTask: cancelled,
+    });
+
+    const result = await controlRealtimeVoiceAgentRun(
+      {
+        sessionKey: "agent:main:main",
+        text: "cancel that",
+        mode: "cancel",
+        cfg: {},
+      },
+      deps,
+    );
+
+    expect(deps.cancelTaskById).toHaveBeenCalledWith({
+      cfg: {},
+      taskId: "task-implicit",
+      reason: "Cancelled by voice request.",
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      mode: "cancel",
+      target: "task",
+      jobId: "task-implicit",
+      aborted: true,
+    });
   });
 
   it("does not report stale control tool progress after the active run ends", async () => {

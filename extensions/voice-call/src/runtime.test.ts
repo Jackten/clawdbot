@@ -670,6 +670,7 @@ describe("createVoiceCallRuntime lifecycle", () => {
     config.realtime.enabled = true;
     config.realtime.consultThinkingLevel = "ultra";
     config.realtime.consultFastMode = true;
+    config.responseTimeoutMs = 12_345;
     const sessionStore: Record<string, unknown> = {};
     const runEmbeddedAgent = vi.fn(async () => ({
       payloads: [{ text: "Done." }],
@@ -716,5 +717,6 @@ describe("createVoiceCallRuntime lifecycle", () => {
     );
     expect(consultParams.thinkLevel).toBe("ultra");
     expect(consultParams.fastMode).toBe(true);
+    expect(consultParams.timeoutMs).toBe(12_345);
   });
 });

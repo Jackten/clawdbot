@@ -14,6 +14,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { CallGatewayOptions } from "../gateway/call.js";
 import { SUBAGENT_KILL_TASK_ERROR } from "../tasks/detached-task-runtime-contract.js";
 import {
+  cancelSubagentRunsForParentRun,
   testing,
   killAllControlledSubagentRuns,
   killControlledSubagentRun,
@@ -627,6 +628,45 @@ describe("killSubagentRunAdmin", () => {
         status: "cancelled",
       }),
     );
+  });
+
+  it("cancels only children owned by the exact parent run", async () => {
+    const ownedChild = "agent:main:subagent:owned";
+    const newerChild = "agent:main:subagent:newer";
+    const storePath = writeSessionStoreFixture("parent-run-cancel", {
+      [ownedChild]: { sessionId: "sess-owned", updatedAt: Date.now() },
+      [newerChild]: { sessionId: "sess-newer", updatedAt: Date.now() },
+    });
+    for (const entry of [
+      {
+        runId: "run-owned-child",
+        parentRunId: "run-parent-old",
+        childSessionKey: ownedChild,
+      },
+      {
+        runId: "run-newer-child",
+        parentRunId: "run-parent-new",
+        childSessionKey: newerChild,
+      },
+    ]) {
+      addSubagentRunForTests({
+        ...entry,
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        task: "work",
+        cleanup: "keep",
+        createdAt: Date.now() - 1_000,
+      });
+    }
+
+    const result = await cancelSubagentRunsForParentRun({
+      cfg: cfgWithSessionStore(storePath),
+      parentRunId: "run-parent-old",
+    });
+
+    expect(result).toEqual({ matched: 1, killed: 1 });
+    expect(getSubagentRunByChildSessionKey(ownedChild)?.endedAt).toBeTypeOf("number");
+    expect(getSubagentRunByChildSessionKey(newerChild)?.endedAt).toBeUndefined();
   });
 
   it("returns found=false when the session key is not tracked as a subagent run", async () => {

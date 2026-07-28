@@ -1,14 +1,27 @@
 // Agent consult runtime starts agent consultation flows from talk sessions.
 import { randomUUID } from "node:crypto";
+import { resolveAgentResultFreshness } from "../agents/agent-mutation-coordinator.js";
+import { deriveAgentRunResourceScope } from "../agents/agent-run-admission.js";
 import type { RunEmbeddedAgentParams } from "../agents/embedded-agent-runner/run/params.js";
 import { forkSessionEntryFromParent } from "../auto-reply/reply/session-fork.js";
 import { resolveSessionWorkStartError } from "../config/sessions/lifecycle.js";
 import { parseSessionThreadInfoFast } from "../config/sessions/thread-info.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { mergeAbortSignals } from "../infra/abort-signal.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import type { RuntimeLogger, PluginRuntimeCore } from "../plugins/runtime/types-core.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import { beginSessionWorkAdmission } from "../sessions/session-lifecycle-admission.js";
+import { registerActiveCliTaskRun } from "../tasks/cli-task-cancel.js";
+import {
+  createRunningTaskRun,
+  finalizeTaskRunByRunId,
+  recordTaskRunProgressByRunId,
+  setDetachedTaskDeliveryStatusByRunId,
+} from "../tasks/detached-task-runtime.js";
+import { maybeDeliverTaskTerminalUpdate } from "../tasks/runtime-internal.js";
+import { formatTaskStatusTitleText } from "../tasks/task-status.js";
 import {
   deliveryContextFromSession,
   normalizeDeliveryContext,
@@ -17,6 +30,7 @@ import {
 import {
   buildRealtimeVoiceAgentConsultPrompt,
   collectRealtimeVoiceAgentConsultVisibleText,
+  parseRealtimeVoiceAgentConsultArgs,
   type RealtimeVoiceAgentConsultTranscriptEntry,
 } from "./agent-consult-tool.js";
 
@@ -26,9 +40,18 @@ import {
 export type RealtimeVoiceAgentConsultRuntime = PluginRuntimeCore["agent"];
 
 /**
- * Speakable text returned to the realtime voice bridge after an agent consult.
+ * Speakable result returned to the realtime voice bridge after an agent consult.
  */
-export type RealtimeVoiceAgentConsultResult = { text: string };
+export type RealtimeVoiceAgentConsultResult =
+  | { text: string }
+  | {
+      text: string;
+      status: "accepted";
+      jobId: string;
+      runId: string;
+      title: string;
+      state: "running";
+    };
 
 /**
  * Controls whether voice consults run in a fresh session or fork context from the requester.
@@ -43,14 +66,17 @@ export {
 type RealtimeVoiceAgentConsultDeps = {
   randomUUID: typeof randomUUID;
   forkSessionEntryFromParent: typeof forkSessionEntryFromParent;
+  monotonicNow: () => number;
 };
 
 const defaultRealtimeVoiceAgentConsultDeps: RealtimeVoiceAgentConsultDeps = {
   randomUUID,
   forkSessionEntryFromParent,
+  monotonicNow: () => performance.now(),
 };
 
 let realtimeVoiceAgentConsultDeps = defaultRealtimeVoiceAgentConsultDeps;
+const DEFAULT_REALTIME_VOICE_AGENT_CONSULT_WAIT_MS = 2_000;
 
 /**
  * Overrides consult runtime dependencies for deterministic tests.
@@ -230,7 +256,12 @@ export async function consultRealtimeVoiceAgent(params: {
   model?: RunEmbeddedAgentParams["model"];
   thinkLevel?: RunEmbeddedAgentParams["thinkLevel"];
   fastMode?: RunEmbeddedAgentParams["fastMode"];
+  /** Agent-run lifetime. This remains independent from the brief interactive wait. */
   timeoutMs?: number;
+  /** How long the realtime caller waits before receiving a durable running receipt. */
+  waitTimeoutMs?: number;
+  /** Absolute deadline after which the answer is stale and must not be spoken as current. */
+  freshnessDeadlineAtMs?: number;
   toolsAllow?: string[];
   extraSystemPrompt?: string;
   fallbackText?: string;
@@ -273,8 +304,9 @@ export async function consultRealtimeVoiceAgent(params: {
     },
   });
 
+  let releaseTransferredToRun = false;
   try {
-    return await sessionWorkAdmission.run(async () => {
+    const prepared = await sessionWorkAdmission.run(async () => {
       await params.agentRuntime.ensureAgentWorkspace({ dir: workspaceDir });
 
       // The consult session stores normal session metadata so subsequent voice turns can keep
@@ -299,70 +331,270 @@ export async function consultRealtimeVoiceAgent(params: {
       const consultDeliveryContext =
         resolvedDeliveryContext ?? deliveryContextFromSession(sessionEntry);
       const sessionId = sessionEntry.sessionId;
+      const parsedArgs = parseRealtimeVoiceAgentConsultArgs(params.args);
+      const title = formatTaskStatusTitleText(parsedArgs.question, "Agent consult");
+      const runId = `${params.runIdPrefix}:${realtimeVoiceAgentConsultDeps.randomUUID()}`;
+      const requesterSessionKey = params.spawnedBy?.trim() || params.sessionKey;
+      const task = createRunningTaskRun({
+        runtime: "cli",
+        taskKind: "agent_consult",
+        sourceId: params.runIdPrefix,
+        requesterSessionKey,
+        ownerKey: requesterSessionKey,
+        scopeKind: "session",
+        requesterOrigin: consultDeliveryContext,
+        childSessionKey: params.sessionKey,
+        agentId,
+        requesterAgentId: parseAgentSessionKey(requesterSessionKey)?.agentId,
+        runId,
+        label: title,
+        task: parsedArgs.question,
+        progressSummary: "Queued for background admission.",
+        notifyPolicy: "done_only",
+        // The fast path returns its result directly. Delivery is armed only
+        // after the caller's wait expires, preventing duplicate publication.
+        deliveryStatus: "not_applicable",
+      });
+      if (!task) {
+        throw new Error("realtime voice agent consult receipt could not be persisted");
+      }
+      const taskAbortController = new AbortController();
+      const mergedAbort = mergeAbortSignals([
+        lifecycleAbortController.signal,
+        taskAbortController.signal,
+      ]);
+      const unregisterTaskCancellation = registerActiveCliTaskRun({
+        runId,
+        cancel: (reason) => {
+          if (taskAbortController.signal.aborted) {
+            return false;
+          }
+          taskAbortController.abort(reason);
+          return true;
+        },
+      });
 
       // Voice consults suppress verbose/reasoning output because the bridge needs a short,
       // speakable answer, not agent-run diagnostics or hidden reasoning artifacts.
-      const result = await params.agentRuntime.runEmbeddedAgent({
-        sessionId,
-        sessionKey: params.sessionKey,
-        sessionTarget: {
-          agentId,
-          sessionId,
-          sessionKey: params.sessionKey,
-          storePath,
-        },
-        sandboxSessionKey: resolveRealtimeVoiceAgentSandboxSessionKey(agentId, params.sessionKey),
-        agentId,
-        spawnedBy: params.spawnedBy,
-        messageProvider: consultDeliveryContext?.channel ?? params.messageProvider,
-        agentAccountId: consultDeliveryContext?.accountId,
-        messageTo: consultDeliveryContext?.to,
-        messageThreadId: consultDeliveryContext?.threadId,
-        currentChannelId: consultDeliveryContext?.to,
-        currentThreadTs:
-          consultDeliveryContext?.threadId != null
-            ? String(consultDeliveryContext.threadId)
-            : undefined,
-        workspaceDir,
-        config: params.cfg,
-        prompt: buildRealtimeVoiceAgentConsultPrompt({
-          args: params.args,
-          transcript: params.transcript,
-          surface: params.surface,
-          userLabel: params.userLabel,
-          assistantLabel: params.assistantLabel,
-          questionSourceLabel: params.questionSourceLabel,
-        }),
-        provider: params.provider,
-        model: params.model,
-        thinkLevel: params.thinkLevel ?? "high",
-        fastMode: params.fastMode,
-        verboseLevel: "off",
-        reasoningLevel: "off",
-        toolResultFormat: "plain",
-        toolsAllow: params.toolsAllow,
-        timeoutMs:
-          params.timeoutMs ?? params.agentRuntime.resolveAgentTimeoutMs({ cfg: params.cfg }),
-        runId: `${params.runIdPrefix}:${Date.now()}`,
-        lane: params.lane,
-        extraSystemPrompt:
-          params.extraSystemPrompt ??
-          "You are the configured OpenClaw agent receiving delegated requests from a live voice bridge. Act on behalf of the user, use available tools when appropriate, and return a brief speakable result.",
-        agentDir,
-        abortSignal: lifecycleAbortController.signal,
+      const waitStartedAtMs = realtimeVoiceAgentConsultDeps.monotonicNow();
+      const job = Promise.resolve().then(async () => {
+        const finalizeFailure = (status: "failed" | "timed_out" | "cancelled", error: unknown) => {
+          const detail = formatErrorMessage(error);
+          const message = `Agent consult ${runId} ${status.replace("_", " ")}: ${detail}`;
+          finalizeTaskRunByRunId({
+            runId,
+            runtime: "cli",
+            sessionKey: params.sessionKey,
+            status,
+            endedAt: Date.now(),
+            error: message,
+            terminalSummary: message,
+          });
+          return {
+            kind: "error" as const,
+            error: new Error(message, {
+              cause: error instanceof Error ? error : undefined,
+            }),
+          };
+        };
+
+        try {
+          const result = await params.agentRuntime.runEmbeddedAgent({
+            sessionId,
+            sessionKey: params.sessionKey,
+            sessionTarget: {
+              agentId,
+              sessionId,
+              sessionKey: params.sessionKey,
+              storePath,
+            },
+            sandboxSessionKey: resolveRealtimeVoiceAgentSandboxSessionKey(
+              agentId,
+              params.sessionKey,
+            ),
+            agentId,
+            spawnedBy: params.spawnedBy,
+            messageProvider: consultDeliveryContext?.channel ?? params.messageProvider,
+            agentAccountId: consultDeliveryContext?.accountId,
+            messageTo: consultDeliveryContext?.to,
+            messageThreadId: consultDeliveryContext?.threadId,
+            currentChannelId: consultDeliveryContext?.to,
+            currentThreadTs:
+              consultDeliveryContext?.threadId != null
+                ? String(consultDeliveryContext.threadId)
+                : undefined,
+            workspaceDir,
+            config: params.cfg,
+            prompt: buildRealtimeVoiceAgentConsultPrompt({
+              args: params.args,
+              transcript: params.transcript,
+              surface: params.surface,
+              userLabel: params.userLabel,
+              assistantLabel: params.assistantLabel,
+              questionSourceLabel: params.questionSourceLabel,
+            }),
+            provider: params.provider,
+            model: params.model,
+            thinkLevel: params.thinkLevel ?? "high",
+            fastMode: params.fastMode,
+            verboseLevel: "off",
+            reasoningLevel: "off",
+            toolResultFormat: "plain",
+            toolsAllow: params.toolsAllow,
+            timeoutMs:
+              params.timeoutMs ?? params.agentRuntime.resolveAgentTimeoutMs({ cfg: params.cfg }),
+            runId,
+            lane: params.lane,
+            admission: {
+              priority: "background",
+              freshnessDeadlineAtMs: params.freshnessDeadlineAtMs,
+              resourceScope: deriveAgentRunResourceScope({
+                request: parsedArgs.question,
+                messageTo: consultDeliveryContext?.to,
+                messageThreadId: consultDeliveryContext?.threadId,
+              }),
+              onQueueReason: (reason) => {
+                recordTaskRunProgressByRunId({
+                  runId,
+                  runtime: "cli",
+                  sessionKey: params.sessionKey,
+                  lastEventAt: Date.now(),
+                  progressSummary: reason?.detail ?? "Agent consult is running.",
+                  eventSummary: reason
+                    ? `Agent consult queued: ${reason.code}`
+                    : "Agent consult admitted.",
+                });
+              },
+            },
+            jobId: task.taskId,
+            extraSystemPrompt:
+              params.extraSystemPrompt ??
+              "You are the configured OpenClaw agent receiving delegated requests from a live voice bridge. Act on behalf of the user, use available tools when appropriate, and return a brief speakable result.",
+            agentDir,
+            abortSignal: mergedAbort.signal,
+          });
+
+          if (result.meta?.aborted) {
+            const status =
+              taskAbortController.signal.aborted || lifecycleAbortController.signal.aborted
+                ? "cancelled"
+                : result.meta.timeoutPhase
+                  ? "timed_out"
+                  : "failed";
+            return finalizeFailure(
+              status,
+              result.meta.timeoutPhase
+                ? `run timeout during ${result.meta.timeoutPhase}`
+                : "agent run aborted",
+            );
+          }
+
+          const text = collectRealtimeVoiceAgentConsultVisibleText(result.payloads ?? []);
+          let answer =
+            text ?? params.fallbackText ?? "I need a moment to verify that before answering.";
+          if (params.freshnessDeadlineAtMs !== undefined) {
+            const freshness = await resolveAgentResultFreshness({
+              jobId: task.taskId,
+              resultKey: "answer",
+              deadlineAt: params.freshnessDeadlineAtMs,
+              value: answer,
+            });
+            if (freshness.status === "stale") {
+              answer =
+                "That result finished after its freshness deadline, so I will not present it as current.";
+            } else {
+              answer = freshness.value;
+            }
+          }
+          if (!text) {
+            params.logger.warn(
+              "[talk] agent consult produced no answer: agent returned no speakable text",
+            );
+          }
+          finalizeTaskRunByRunId({
+            runId,
+            runtime: "cli",
+            sessionKey: params.sessionKey,
+            status: "succeeded",
+            endedAt: Date.now(),
+            terminalSummary: answer,
+            terminalOutcome: "succeeded",
+          });
+          return {
+            kind: "result" as const,
+            result: { text: answer },
+          };
+        } catch (error) {
+          const status =
+            taskAbortController.signal.aborted || lifecycleAbortController.signal.aborted
+              ? "cancelled"
+              : error instanceof Error && error.name === "TimeoutError"
+                ? "timed_out"
+                : "failed";
+          return finalizeFailure(status, error);
+        }
       });
 
-      const text = collectRealtimeVoiceAgentConsultVisibleText(result.payloads ?? []);
-      if (!text) {
-        const reason = result.meta?.aborted
-          ? "agent run aborted"
-          : "agent returned no speakable text";
-        params.logger.warn(`[talk] agent consult produced no answer: ${reason}`);
-        return { text: params.fallbackText ?? "I need a moment to verify that before answering." };
-      }
-      return { text };
+      return {
+        job,
+        runId,
+        taskId: task.taskId,
+        title,
+        waitStartedAtMs,
+        dispose: () => {
+          unregisterTaskCancellation?.();
+          mergedAbort.dispose();
+        },
+      };
     });
+
+    const job = prepared.job.finally(() => {
+      prepared.dispose();
+      sessionWorkAdmission.release();
+    });
+    releaseTransferredToRun = true;
+    const waitTimeoutMs = Math.max(
+      0,
+      Math.floor(params.waitTimeoutMs ?? DEFAULT_REALTIME_VOICE_AGENT_CONSULT_WAIT_MS),
+    );
+    const waitDeadlineAtMs = prepared.waitStartedAtMs + waitTimeoutMs;
+    let waitTimer: ReturnType<typeof setTimeout> | undefined;
+    const winner = await Promise.race([
+      job.then((outcome) => ({ kind: "job" as const, outcome })),
+      new Promise<{ kind: "wait-expired" }>((resolve) => {
+        waitTimer = setTimeout(() => resolve({ kind: "wait-expired" }), waitTimeoutMs);
+        waitTimer.unref?.();
+      }),
+    ]);
+    if (waitTimer) {
+      clearTimeout(waitTimer);
+    }
+    const waitExpired = realtimeVoiceAgentConsultDeps.monotonicNow() >= waitDeadlineAtMs;
+    if (winner.kind === "job" && !waitExpired) {
+      if (winner.outcome.kind === "error") {
+        throw winner.outcome.error;
+      }
+      return winner.outcome.result;
+    }
+
+    const armedTasks = setDetachedTaskDeliveryStatusByRunId({
+      runId: prepared.runId,
+      runtime: "cli",
+      sessionKey: params.sessionKey,
+      deliveryStatus: "pending",
+    });
+    await Promise.all(armedTasks.map((task) => maybeDeliverTaskTerminalUpdate(task.taskId)));
+    return {
+      text: "That work is still running. I’ll deliver the result when it finishes.",
+      status: "accepted",
+      jobId: prepared.taskId,
+      runId: prepared.runId,
+      title: prepared.title,
+      state: "running",
+    };
   } finally {
-    sessionWorkAdmission.release();
+    if (!releaseTransferredToRun) {
+      sessionWorkAdmission.release();
+    }
   }
 }
