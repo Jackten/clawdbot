@@ -1,5 +1,13 @@
 // Durable final-reply delivery for inbound channel turns.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import {
+  finalizeConversationTurnDelivery,
+  findConversationTurnForDelivery,
+  markConversationTurnDeliveryDispatched,
+  prepareConversationTurnDelivery,
+  recordConversationTurnDeliveryEvidence,
+  resolveConversationTurnDeliveryQueueId,
+} from "../../agents/conversation-turn-durability.js";
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import type { FinalizedMsgContext } from "../../auto-reply/templating.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -97,6 +105,40 @@ function resolveDurableInboundReplyThreadId(
 
 function stringifyThreadId(value: string | number | null | undefined): string | undefined {
   return value == null ? undefined : String(value);
+}
+
+function resolveConversationTurnSessionKey(ctxPayload: FinalizedMsgContext): string | undefined {
+  return (
+    normalizeOptionalString(ctxPayload.CommandTargetSessionKey) ??
+    normalizeOptionalString(ctxPayload.SessionKey)
+  );
+}
+
+/** Marks an inbound turn terminal only after its complete reply dispatch has settled. */
+export function finalizeInboundConversationTurnDelivery(
+  ctxPayload: FinalizedMsgContext,
+  deliveryTarget?: string,
+  channel?: string,
+  accountId?: string,
+): void {
+  finalizeConversationTurnDelivery({
+    channel:
+      normalizeOptionalString(channel) ??
+      normalizeOptionalString(ctxPayload.OriginatingChannel) ??
+      normalizeOptionalString(ctxPayload.Surface) ??
+      normalizeOptionalString(ctxPayload.Provider),
+    accountId:
+      normalizeOptionalString(accountId) ?? normalizeOptionalString(ctxPayload.AccountId) ?? "",
+    sessionKey: resolveConversationTurnSessionKey(ctxPayload),
+    deliveryTarget:
+      normalizeOptionalString(deliveryTarget) ??
+      normalizeOptionalString(ctxPayload.OriginatingTo) ??
+      normalizeOptionalString(ctxPayload.To),
+    messageId:
+      normalizeOptionalString(ctxPayload.MessageSidFull) ??
+      normalizeOptionalString(ctxPayload.MessageSidLast) ??
+      normalizeOptionalString(ctxPayload.MessageSid),
+  });
 }
 
 function toDeliveryIntent(intent: OutboundDeliveryIntent): ChannelDeliveryResult["deliveryIntent"] {
@@ -200,6 +242,26 @@ export async function deliverInboundReplyWithMessageSendContext(
     requesterSenderUsername: params.ctxPayload.SenderUsername,
     requesterSenderE164: params.ctxPayload.SenderE164,
   });
+  const sourceMessageId =
+    normalizeOptionalString(params.ctxPayload.MessageSidFull) ??
+    normalizeOptionalString(params.ctxPayload.MessageSidLast) ??
+    normalizeOptionalString(params.ctxPayload.MessageSid);
+  const conversationTurn = findConversationTurnForDelivery({
+    channel,
+    accountId: params.accountId ?? "",
+    sessionKey: resolveConversationTurnSessionKey(params.ctxPayload),
+    messageId: sourceMessageId,
+    deliveryTarget: to,
+  });
+  const deliveryQueueId = conversationTurn
+    ? resolveConversationTurnDeliveryQueueId(conversationTurn.turnId, params.payload)
+    : undefined;
+  if (conversationTurn && deliveryQueueId) {
+    // Link the accepted turn to the exact queue id before enqueueing. A crash
+    // after the queue commit but before its callback must still reconcile the
+    // original pending/sent delivery instead of emitting a second notice.
+    prepareConversationTurnDelivery(conversationTurn.turnId, deliveryQueueId);
+  }
 
   const send = await sendDurableMessageBatch({
     cfg: params.cfg,
@@ -219,6 +281,14 @@ export async function deliverInboundReplyWithMessageSendContext(
     ...(durability === "required" ? { requireUnknownSendReconciliation: true } : {}),
     session,
     gatewayClientScopes: params.ctxPayload.GatewayClientScopes ?? [],
+    ...(conversationTurn
+      ? {
+          deliveryQueueId,
+          onDeliveryIntent: () => {
+            markConversationTurnDeliveryDispatched(conversationTurn.turnId, deliveryQueueId!);
+          },
+        }
+      : {}),
   });
   if (send.status === "failed") {
     return { status: "failed" as const, error: send.error };
@@ -239,7 +309,23 @@ export async function deliverInboundReplyWithMessageSendContext(
     ...(send.deliveryIntent ? { deliveryIntent: toDeliveryIntent(send.deliveryIntent) } : {}),
   });
   if (send.status === "suppressed") {
+    if (conversationTurn && send.reason !== "no_visible_result") {
+      // `no_visible_result` can be an intermediate durable attempt followed by
+      // a channel-owned fallback send (WhatsApp). Do not terminalize that gap.
+      recordConversationTurnDeliveryEvidence(conversationTurn.turnId, {
+        kind: "suppressed",
+        reason: send.reason,
+      });
+    }
     return { status: "handled_no_send", reason: send.reason, delivery };
+  }
+  if (conversationTurn) {
+    // This function rejects non-final lifecycle kinds above, so only terminal
+    // final-reply receipts can satisfy the accepted conversation turn.
+    recordConversationTurnDeliveryEvidence(conversationTurn.turnId, {
+      kind: "sent",
+      receipt: send.receipt,
+    });
   }
   return { status: "handled_visible", delivery };
 }

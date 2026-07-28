@@ -211,6 +211,13 @@ export const deliverInboundReplyWithMessageSendContext: ChannelInboundKernelModu
     return await mod.deliverInboundReplyWithMessageSendContext(...args);
   };
 
+/** Marks durable accepted-turn delivery terminal after the plugin dispatcher settles. */
+export const finalizeInboundConversationTurnDelivery: ChannelInboundKernelModule["finalizeInboundConversationTurnDelivery"] =
+  async (...args) => {
+    const mod = await import("../channels/turn/kernel.js");
+    return mod.finalizeInboundConversationTurnDelivery(...args);
+  };
+
 /** Sends a durable message batch without eager-loading channel message runtime internals. */
 export async function sendDurableMessageBatch(
   /**

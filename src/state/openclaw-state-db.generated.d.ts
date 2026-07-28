@@ -334,6 +334,30 @@ export interface ConfigHealthEntries {
   updated_at_ms: number;
 }
 
+export interface ConversationTurns {
+  accepted_at: number;
+  account_id: string;
+  channel: string;
+  content_ref: string;
+  delivery_dispatched_at: number | null;
+  delivery_receipt_json: string | null;
+  delivery_target: string;
+  last_error: string | null;
+  message_id: string;
+  original_delivery_queue_id: string;
+  recovery_delivery_queue_id: string;
+  recovery_queued_at: number | null;
+  recovery_sent_at: number | null;
+  sender_id: string;
+  session_key: string;
+  status: string;
+  succeeded_at: number | null;
+  thread_id: string | null;
+  turn_id: string;
+  unknown_at: number | null;
+  updated_at: number;
+}
+
 export interface CronJobs {
   agent_id: string | null;
   anchor_ms: number | null;
@@ -1212,6 +1236,7 @@ export interface DB {
   command_log_entries: CommandLogEntries;
   commitments: Commitments;
   config_health_entries: ConfigHealthEntries;
+  conversation_turns: ConversationTurns;
   cron_jobs: CronJobs;
   cron_run_logs: CronRunLogs;
   current_conversation_bindings: CurrentConversationBindings;

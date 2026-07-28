@@ -863,6 +863,39 @@ CREATE INDEX IF NOT EXISTS idx_channel_ingress_claims
 CREATE INDEX IF NOT EXISTS idx_channel_ingress_lane
   ON channel_ingress_events(queue_name, status, lane_key);
 
+CREATE TABLE IF NOT EXISTS conversation_turns (
+  turn_id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  sender_id TEXT NOT NULL,
+  delivery_target TEXT NOT NULL,
+  thread_id TEXT,
+  session_key TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  content_ref TEXT NOT NULL,
+  status TEXT NOT NULL,
+  original_delivery_queue_id TEXT NOT NULL,
+  recovery_delivery_queue_id TEXT NOT NULL,
+  accepted_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  delivery_dispatched_at INTEGER,
+  succeeded_at INTEGER,
+  delivery_receipt_json TEXT,
+  unknown_at INTEGER,
+  recovery_queued_at INTEGER,
+  recovery_sent_at INTEGER,
+  last_error TEXT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_conversation_turn_message
+  ON conversation_turns(channel, account_id, delivery_target, session_key, message_id);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_turn_recovery
+  ON conversation_turns(status, accepted_at, turn_id);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_turn_session_message
+  ON conversation_turns(session_key, message_id, accepted_at);
+
 CREATE TABLE IF NOT EXISTS plugin_blob_entries (
   plugin_id TEXT NOT NULL,
   namespace TEXT NOT NULL,

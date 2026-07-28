@@ -40,6 +40,8 @@ import {
   type DeliveryContext,
 } from "../utils/delivery-context.shared.js";
 import { isDeliverableMessageChannel } from "../utils/message-channel.js";
+import { readConversationTurn } from "./conversation-turn-durability.js";
+import { scheduleAcceptedConversationTurnRecovery } from "./conversation-turn-recovery.js";
 import {
   listActiveEmbeddedRunSessionIds,
   listActiveEmbeddedRunSessionKeys,
@@ -720,6 +722,7 @@ function isRoutableRecoveryStore(params: {
 
 async function recoverStore(params: {
   cfg?: OpenClawConfig;
+  stateDir?: string;
   storePath: string;
   resumedSessionKeys: Set<string>;
   activeSessionIds?: Iterable<string>;
@@ -778,6 +781,19 @@ async function recoverStore(params: {
     }
     const resumeDedupeKey = sessionKey;
     if (params.resumedSessionKeys.has(resumeDedupeKey)) {
+      result.skipped++;
+      continue;
+    }
+    const durableTurnId = normalizeOptionalString(entry.restartRecoveryDeliveryRunId);
+    if (durableTurnId && readConversationTurn(durableTurnId, params.stateDir)) {
+      // The accepted-turn ledger owns recovery for this run. It reconciles
+      // delivery receipts and emits a visible UNKNOWN notice; never blind-resume
+      // model/tool work from transcript shape alone.
+      await markSessionFailed({
+        storePath: params.storePath,
+        sessionKey,
+        reason: "accepted conversation turn delegated to durable recovery",
+      });
       result.skipped++;
       continue;
     }
@@ -889,6 +905,7 @@ export async function recoverRestartAbortedMainSessions(
   for (const storePath of await resolveRestartRecoveryStorePaths(params)) {
     const storeResult = await recoverStore({
       cfg: params.cfg,
+      stateDir: params.stateDir,
       storePath,
       resumedSessionKeys,
       activeSessionIds: params.activeSessionIds,
@@ -951,6 +968,11 @@ export function scheduleRestartAbortedMainSessionRecovery(
   const initialDelay = params.delayMs ?? DEFAULT_RECOVERY_DELAY_MS;
   const maxRetries = params.maxRetries ?? MAX_RECOVERY_RETRIES;
   const resumedSessionKeys = new Set<string>();
+  scheduleAcceptedConversationTurnRecovery({
+    cfg: params.cfg ?? {},
+    delayMs: initialDelay,
+    stateDir: params.stateDir,
+  });
   // Only reconcile rows that existed before this startup recovery was scheduled.
   // Fresh runs started by this gateway are protected again by the active-run check.
   const startupRecoveryCutoffMs = Date.now();

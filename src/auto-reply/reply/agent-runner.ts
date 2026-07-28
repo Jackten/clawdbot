@@ -1,5 +1,4 @@
 // Orchestrates reply agent execution, payload building, and delivery callbacks.
-import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
@@ -9,6 +8,11 @@ import {
   resolveSessionAgentId,
 } from "../../agents/agent-scope.js";
 import { resolveContextTokensForModel } from "../../agents/context.js";
+import {
+  acceptConversationTurn,
+  markConversationTurnRunning,
+  resolveConversationTurnId,
+} from "../../agents/conversation-turn-durability.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { isLikelyContextOverflowError } from "../../agents/embedded-agent-helpers/errors.js";
 import {
@@ -1501,10 +1505,10 @@ export async function runReplyAgent(params: {
     shouldDrainQueuedFollowupsAfterClear = true;
     return value;
   };
-  const restartRecoveryDeliveryRunId = crypto.randomUUID();
+  let restartRecoveryDeliveryRunId: string | undefined;
   let trackedRestartRecoveryDeliveryContext = false;
   const persistRestartRecoveryDeliveryContext = async (): Promise<void> => {
-    if (!sessionKey || !storePath) {
+    if (!sessionKey) {
       return;
     }
     const entry = activeSessionStore?.[sessionKey] ?? activeSessionEntry;
@@ -1519,30 +1523,65 @@ export async function runReplyAgent(params: {
     if (!deliveryContext) {
       return;
     }
-    const updatedAt = Date.now();
-    const patch: Partial<SessionEntry> = {
-      restartRecoveryDeliveryContext: deliveryContext,
-      restartRecoveryDeliveryRunId,
-      updatedAt,
-    };
-    const persisted = await updateSessionEntry(
-      {
-        storePath,
-        sessionKey,
-      },
-      async (current) =>
-        current.sessionId === replyOperation.sessionId && current.abortedLastRun !== true
-          ? patch
-          : null,
-    );
-    if (persisted) {
-      activeSessionEntry = persisted;
-      if (activeSessionStore) {
-        activeSessionStore[sessionKey] = persisted;
-      }
-      trackedRestartRecoveryDeliveryContext =
-        persisted.restartRecoveryDeliveryRunId === restartRecoveryDeliveryRunId;
+    const messageId =
+      normalizeOptionalString(sessionCtx.MessageSidFull) ??
+      normalizeOptionalString(sessionCtx.MessageSidLast) ??
+      normalizeOptionalString(sessionCtx.MessageSid);
+    const senderId =
+      normalizeOptionalString(sessionCtx.SenderId) ?? normalizeOptionalString(sessionCtx.From);
+    const channel = normalizeOptionalString(deliveryContext.channel);
+    const accountId = normalizeOptionalString(deliveryContext.accountId);
+    const deliveryTarget = normalizeOptionalString(deliveryContext.to);
+    if (!messageId || !senderId || !channel || !deliveryTarget) {
+      return;
     }
+    restartRecoveryDeliveryRunId = resolveConversationTurnId({
+      channel,
+      accountId,
+      sessionKey,
+      deliveryTarget,
+      threadId: deliveryContext.threadId,
+      messageId,
+    });
+    if (storePath) {
+      const updatedAt = Date.now();
+      const patch: Partial<SessionEntry> = {
+        restartRecoveryDeliveryContext: deliveryContext,
+        restartRecoveryDeliveryRunId,
+        updatedAt,
+      };
+      const persisted = await updateSessionEntry(
+        {
+          storePath,
+          sessionKey,
+        },
+        async (current) =>
+          current.sessionId === replyOperation.sessionId && current.abortedLastRun !== true
+            ? patch
+            : null,
+      );
+      if (persisted) {
+        activeSessionEntry = persisted;
+        if (activeSessionStore) {
+          activeSessionStore[sessionKey] = persisted;
+        }
+        trackedRestartRecoveryDeliveryContext =
+          persisted.restartRecoveryDeliveryRunId === restartRecoveryDeliveryRunId;
+      }
+    }
+
+    const acceptedTurn = acceptConversationTurn({
+      turnId: restartRecoveryDeliveryRunId,
+      channel,
+      accountId,
+      senderId,
+      deliveryTarget,
+      threadId: deliveryContext.threadId,
+      sessionKey,
+      messageId,
+      content: commandBody,
+    });
+    markConversationTurnRunning(acceptedTurn.turnId);
   };
   const clearRestartRecoveryDeliveryContext = async (): Promise<void> => {
     if (!trackedRestartRecoveryDeliveryContext || !sessionKey || !storePath) {

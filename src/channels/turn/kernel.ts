@@ -21,6 +21,7 @@ import {
 } from "./dispatch-result.js";
 import {
   deliverInboundReplyWithMessageSendContext,
+  finalizeInboundConversationTurnDelivery,
   isDurableInboundReplyDeliveryHandled,
   throwIfDurableInboundReplyDeliveryFailed,
 } from "./durable-delivery.js";
@@ -39,6 +40,7 @@ export type { ChannelBotLoopProtectionFacts } from "./bot-loop-protection.js";
 export {
   deliverDurableInboundReplyPayload,
   deliverInboundReplyWithMessageSendContext,
+  finalizeInboundConversationTurnDelivery,
   isDurableInboundReplyDeliveryHandled,
   throwIfDurableInboundReplyDeliveryFailed,
 } from "./durable-delivery.js";
@@ -602,6 +604,14 @@ async function runPreparedChannelTurnCoreInTrace<
       options.suppressObserveOnlyDispatch && admission.kind === "observeOnly"
         ? resolveObserveOnlyDispatchResult(params)
         : await params.runDispatch();
+    // The production buffered dispatcher resolves only after withReplyDispatcher
+    // marks complete and waits for idle. Terminalize after that settled boundary.
+    finalizeInboundConversationTurnDelivery(
+      params.ctxPayload,
+      undefined,
+      params.channel,
+      params.accountId,
+    );
     maybeWarnZeroCountVisibleDispatch({
       ...params,
       admission,

@@ -9,7 +9,10 @@ import {
   toInboundMediaFacts,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { hasVisibleInboundReplyDispatch } from "openclaw/plugin-sdk/channel-inbound";
-import { deliverInboundReplyWithMessageSendContext } from "openclaw/plugin-sdk/channel-outbound";
+import {
+  deliverInboundReplyWithMessageSendContext,
+  finalizeInboundConversationTurnDelivery,
+} from "openclaw/plugin-sdk/channel-outbound";
 import { buildInboundHistoryFromEntries } from "openclaw/plugin-sdk/reply-history";
 import type { FinalizedMsgContext } from "openclaw/plugin-sdk/reply-runtime";
 import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -834,6 +837,12 @@ export async function dispatchWhatsAppBufferedReply(params: {
         : {}),
     },
   });
+  await finalizeInboundConversationTurnDelivery(
+    params.context as FinalizedMsgContext,
+    conversationId,
+    "whatsapp",
+    params.route.accountId,
+  );
   const didQueueVisibleReply = hasVisibleInboundReplyDispatch(dispatchResult);
   const didDeliverVisibleReply = didSendReply || dispatchResult.observedReplyDelivery === true;
   if (!didQueueVisibleReply) {
