@@ -3698,11 +3698,10 @@ export async function runCodexAppServerAttempt(
         nativeHookRelay.unregister();
       }
     };
-    const yieldedOneShotCleanupDeferred =
+    const nativeDescendantCleanupDeferred =
       !timedOut &&
       !runAbortController.signal.aborted &&
       params.cleanupBundleMcpOnRunEnd === true &&
-      yieldDetected &&
       deferCodexNativeDescendantCleanup({
         monitor: nativeSubagentMonitorRef.current,
         parentThreadId: thread.threadId,
@@ -3718,7 +3717,7 @@ export async function runCodexAppServerAttempt(
         },
         releaseRelayAfterSettlement: releaseNativeHookRelayAfterSettlement,
       });
-    if (!timedOut && !yieldedOneShotCleanupDeferred) {
+    if (!timedOut && !nativeDescendantCleanupDeferred) {
       await unsubscribeCodexThreadBestEffort(client, {
         threadId: thread.threadId,
         timeoutMs: CODEX_APP_SERVER_UNSUBSCRIBE_TIMEOUT_MS,
@@ -3727,10 +3726,10 @@ export async function runCodexAppServerAttempt(
     userInputBridgeRef.current?.cancelPending();
     turnWatches.clearAllTimers();
     releaseCurrentRoute();
-    if (!yieldedOneShotCleanupDeferred) {
+    if (!nativeDescendantCleanupDeferred) {
       await releaseSharedClientLeaseAndRetireOneShotClient();
     }
-    if (!yieldedOneShotCleanupDeferred) {
+    if (!nativeDescendantCleanupDeferred) {
       releaseNativeHookRelayAfterSettlement();
     }
     await releaseSandboxExecEnvironment();

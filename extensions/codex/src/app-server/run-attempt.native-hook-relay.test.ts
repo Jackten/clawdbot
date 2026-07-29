@@ -744,6 +744,74 @@ describe("runCodexAppServerAttempt native hook relay", () => {
     }
   });
 
+  it("retains the relay for a native child even without a separate yield marker", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const harness = createStartedThreadHarness();
+    const params = createParams(sessionFile, workspaceDir);
+    params.cleanupBundleMcpOnRunEnd = true;
+
+    const run = runCodexAppServerAttempt(params, {
+      nativeHookRelay: {
+        enabled: true,
+        events: ["pre_tool_use"],
+      },
+    });
+    await harness.waitForMethod("turn/start");
+    const startRequest = harness.requests.find((request) => request.method === "thread/start");
+    const relayId = extractRelayIdFromThreadRequest(startRequest?.params);
+    const generation = extractGenerationFromThreadRequest(startRequest?.params);
+
+    await harness.notify({
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "child-thread",
+          source: {
+            subAgent: {
+              thread_spawn: {
+                parent_thread_id: "thread-1",
+                depth: 1,
+                agent_path: "/root/child",
+              },
+            },
+          },
+        },
+      },
+    });
+    await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+    const result = await run;
+
+    expect(result.yieldDetected).toBe(false);
+    expect(nativeHookRelayTesting.getNativeHookRelayRegistrationForTests(relayId)).toBeDefined();
+    await expect(
+      invokeNativeHookRelay({
+        provider: "codex",
+        relayId,
+        generation,
+        event: "pre_tool_use",
+        requireGeneration: true,
+        rawPayload: {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_use_id: "detached-child-tool",
+          tool_input: { command: "date" },
+        },
+      }),
+    ).resolves.toBeDefined();
+
+    await harness.notify({
+      method: "turn/completed",
+      params: {
+        threadId: "child-thread",
+        turnId: "child-turn",
+        turn: { id: "child-turn", status: "interrupted" },
+      },
+    });
+    testing.flushPendingCodexNativeHookRelayUnregistersForTests();
+    expect(nativeHookRelayTesting.getNativeHookRelayRegistrationForTests(relayId)).toBeUndefined();
+  });
+
   it("hard-caps a deferred native hook relay at its existing expiry", async () => {
     vi.useFakeTimers();
     try {
