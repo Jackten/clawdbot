@@ -297,12 +297,16 @@ function deferCodexNativeDescendantCleanup(params: {
   monitor: NativeDescendantSettlementMonitor | undefined;
   parentThreadId: string;
   relay: NativeHookRelayRegistrationHandle | undefined;
+  abortSignal?: AbortSignal;
   cleanupParent: () => Promise<void>;
   releaseRelayAfterSettlement: () => void;
 }): boolean {
   let settlementStarted = false;
-  let relayReleased = false;
+  let forceImmediateRelayRelease = false;
+  let relayDeadlineReached = false;
   let relayDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let detachAbortListener: () => void = () => {};
+  const relayDeadlineAtMs = params.relay?.expiresAtMs;
 
   const clearRelayDeadlineTimer = () => {
     if (!relayDeadlineTimer) {
@@ -312,10 +316,10 @@ function deferCodexNativeDescendantCleanup(params: {
     relayDeadlineTimer = undefined;
   };
   const releaseRelayAtDeadline = () => {
-    if (relayReleased || !params.relay) {
+    if (relayDeadlineReached || !params.relay || relayDeadlineAtMs === undefined) {
       return;
     }
-    const remainingMs = params.relay.expiresAtMs - Date.now();
+    const remainingMs = relayDeadlineAtMs - Date.now();
     if (remainingMs > 0) {
       relayDeadlineTimer = setTimeout(
         releaseRelayAtDeadline,
@@ -324,20 +328,31 @@ function deferCodexNativeDescendantCleanup(params: {
       relayDeadlineTimer.unref?.();
       return;
     }
-    relayReleased = true;
+    relayDeadlineReached = true;
+    forceImmediateRelayRelease = true;
     params.relay.unregister();
+    void settle();
   };
   const settle = async () => {
     if (settlementStarted) {
       return;
     }
     settlementStarted = true;
-    clearRelayDeadlineTimer();
     try {
       await params.cleanupParent();
     } finally {
-      if (!relayReleased) {
-        relayReleased = true;
+      detachAbortListener();
+      if (params.relay && !relayDeadlineReached) {
+        if (forceImmediateRelayRelease || params.abortSignal?.aborted) {
+          clearRelayDeadlineTimer();
+          relayDeadlineReached = true;
+          params.relay.unregister();
+        } else {
+          // The absolute deadline remains armed while the normal late-hook
+          // grace runs, so asynchronous cleanup cannot extend relay lifetime.
+          params.releaseRelayAfterSettlement();
+        }
+      } else if (!params.relay) {
         params.releaseRelayAfterSettlement();
       }
     }
@@ -346,6 +361,17 @@ function deferCodexNativeDescendantCleanup(params: {
   const deferred = params.monitor?.deferUntilParentSettles(params.parentThreadId, settle) ?? false;
   if (!deferred) {
     return false;
+  }
+  if (params.abortSignal) {
+    const abort = () => {
+      forceImmediateRelayRelease = true;
+      void settle();
+    };
+    params.abortSignal.addEventListener("abort", abort, { once: true });
+    detachAbortListener = () => params.abortSignal?.removeEventListener("abort", abort);
+    if (params.abortSignal.aborted) {
+      abort();
+    }
   }
   if (params.relay) {
     releaseRelayAtDeadline();
@@ -3701,11 +3727,11 @@ export async function runCodexAppServerAttempt(
     const nativeDescendantCleanupDeferred =
       !timedOut &&
       !runAbortController.signal.aborted &&
-      params.cleanupBundleMcpOnRunEnd === true &&
       deferCodexNativeDescendantCleanup({
         monitor: nativeSubagentMonitorRef.current,
         parentThreadId: thread.threadId,
         relay: nativeHookRelay,
+        abortSignal: runAbortController.signal,
         cleanupParent: async () => {
           // Keep the parent subscription and native hook relay alive until
           // native child delivery; dropping either strands the detached child.

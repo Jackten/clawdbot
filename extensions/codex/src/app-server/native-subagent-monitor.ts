@@ -45,7 +45,7 @@ type ParentState = {
   agentId?: string;
   taskRuntime?: AgentHarnessTaskRuntime;
   mirror?: CodexNativeSubagentTaskMirror;
-  deferredSettlement?: () => Promise<void> | void;
+  deferredSettlements?: Set<() => Promise<void> | void>;
   deliveredCompletionKeys: Set<string>;
 };
 
@@ -164,11 +164,24 @@ export class CodexNativeSubagentMonitor {
 
   dispose(): void {
     this.clearTimers();
+    const deferredSettlements: Array<{
+      parentThreadId: string;
+      callback: () => Promise<void> | void;
+    }> = [];
+    for (const state of this.parentStates.values()) {
+      for (const callback of state.deferredSettlements ?? []) {
+        deferredSettlements.push({ parentThreadId: state.parentThreadId, callback });
+      }
+      state.deferredSettlements?.clear();
+    }
     this.parentStates.clear();
     this.childThreadParents.clear();
     this.childStates.clear();
     this.childThreadIdsByAgentPath.clear();
     this.transcriptPathsByChildThreadId.clear();
+    for (const settlement of deferredSettlements) {
+      void this.runDeferredParentSettlement(settlement.parentThreadId, settlement.callback);
+    }
   }
 
   deferUntilParentSettles(parentThreadId: string, callback: () => Promise<void> | void): boolean {
@@ -177,9 +190,10 @@ export class CodexNativeSubagentMonitor {
     if (!state || !this.hasUnsettledChildren(normalizedParentThreadId)) {
       return false;
     }
-    // A yielded one-shot turn must keep this monitor alive until its child
+    // A completed parent turn must keep this monitor alive until every child
     // result reaches the parent; cleanup ownership transfers back afterward.
-    state.deferredSettlement = callback;
+    state.deferredSettlements ??= new Set();
+    state.deferredSettlements.add(callback);
     return true;
   }
 
@@ -720,12 +734,14 @@ export class CodexNativeSubagentMonitor {
       return;
     }
     const state = this.parentStates.get(parentThreadId);
-    const callback = state?.deferredSettlement;
-    if (!state || !callback) {
+    const callbacks = state?.deferredSettlements ? Array.from(state.deferredSettlements) : [];
+    if (!state || callbacks.length === 0) {
       return;
     }
-    state.deferredSettlement = undefined;
-    await this.runDeferredParentSettlement(parentThreadId, callback);
+    state.deferredSettlements?.clear();
+    for (const callback of callbacks) {
+      await this.runDeferredParentSettlement(parentThreadId, callback);
+    }
   }
 
   private async runDeferredParentSettlement(
@@ -781,6 +797,15 @@ export class CodexNativeSubagentMonitor {
     const normalizedParentThreadId = parentThreadId.trim();
     const normalizedChildThreadId = childThreadId.trim();
     if (!normalizedParentThreadId || !normalizedChildThreadId) {
+      return;
+    }
+    const existingChildState = this.childStates.get(normalizedChildThreadId);
+    if (existingChildState && existingChildState.parentThreadId !== normalizedParentThreadId) {
+      embeddedAgentLog.warn("Ignoring conflicting Codex native subagent parent assignment", {
+        childThreadId: normalizedChildThreadId,
+        existingParentThreadId: existingChildState.parentThreadId,
+        requestedParentThreadId: normalizedParentThreadId,
+      });
       return;
     }
     this.childThreadParents.set(normalizedChildThreadId, normalizedParentThreadId);
@@ -995,6 +1020,9 @@ export class CodexNativeSubagentMonitor {
     }> = [];
     for (const task of tasks) {
       if (!this.shouldReconcileCodexNativeTask(task)) {
+        continue;
+      }
+      if (state.requesterSessionKey && task.requesterSessionKey !== state.requesterSessionKey) {
         continue;
       }
       const childThreadId = task.runId!.slice(CODEX_NATIVE_SUBAGENT_RUN_ID_PREFIX.length).trim();

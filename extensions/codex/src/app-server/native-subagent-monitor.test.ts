@@ -874,6 +874,47 @@ describe("CodexNativeSubagentMonitor", () => {
     expect(cleanup).toHaveBeenCalledOnce();
   });
 
+  it("runs every deferred cleanup owner when descendants settle", async () => {
+    const client = createClient();
+    const monitor = new CodexNativeSubagentMonitor(client, createRuntime());
+    const firstCleanup = vi.fn();
+    const secondCleanup = vi.fn();
+    monitor.registerParent({
+      parentThreadId: "parent-thread",
+      requesterSessionKey: "agent:main:main",
+      taskRuntimeScope: createTaskScope("agent:main:main"),
+      agentId: "main",
+    });
+
+    await notifyChildStarted(client);
+    expect(monitor.deferUntilParentSettles("parent-thread", firstCleanup)).toBe(true);
+    expect(monitor.deferUntilParentSettles("parent-thread", secondCleanup)).toBe(true);
+    await client.notify(childTurnCompletedNotification({ status: "interrupted" }));
+
+    expect(firstCleanup).toHaveBeenCalledOnce();
+    expect(secondCleanup).toHaveBeenCalledOnce();
+  });
+
+  it("drains deferred cleanup owners when the app-server client closes", async () => {
+    const client = createClient();
+    const monitor = new CodexNativeSubagentMonitor(client, createRuntime());
+    const cleanup = vi.fn(async () => undefined);
+    monitor.registerParent({
+      parentThreadId: "parent-thread",
+      requesterSessionKey: "agent:main:main",
+      taskRuntimeScope: createTaskScope("agent:main:main"),
+      agentId: "main",
+    });
+
+    await notifyChildStarted(client);
+    expect(monitor.deferUntilParentSettles("parent-thread", cleanup)).toBe(true);
+    client.close();
+
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    monitor.dispose();
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
   it("leaves immediate parent cleanup with the caller", () => {
     const client = createClient();
     const monitor = new CodexNativeSubagentMonitor(client, createRuntime());
@@ -1688,6 +1729,46 @@ describe("CodexNativeSubagentMonitor", () => {
       );
     });
 
+    client.close();
+  });
+
+  it("does not attach a foreign session task row to the current parent", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-subagent-"));
+    const codexHome = path.join(tempDir, "codex-home");
+    await fs.mkdir(path.join(codexHome, "sessions"), { recursive: true });
+    const client = createClient();
+    const runtime = createRuntime();
+    runtime.listTaskRecords.mockReturnValue([
+      {
+        taskId: "foreign-task",
+        runtime: "subagent",
+        taskKind: "codex-native",
+        requesterSessionKey: "agent:other:discord:channel:C999",
+        ownerKey: "agent:other:discord:channel:C999",
+        scopeKind: "session",
+        runId: "codex-thread:foreign-child",
+        task: "unrelated work",
+        status: "running",
+        deliveryStatus: "not_applicable",
+        notifyPolicy: "silent",
+        createdAt: 1,
+      },
+    ]);
+    const monitor = new CodexNativeSubagentMonitor(client, runtime, {
+      codexHome,
+      taskRowReconcileIntervalMs: 0,
+      transcriptPollDelaysMs: [60_000],
+    });
+    monitor.registerParent({
+      parentThreadId: "parent-thread",
+      requesterSessionKey: "agent:main:discord:channel:C123",
+      taskRuntimeScope: createTaskScope(),
+      agentId: "main",
+    });
+
+    await monitor.reconcileKnownTaskRows();
+
+    expect(monitor.deferUntilParentSettles("parent-thread", vi.fn())).toBe(false);
     client.close();
   });
 
