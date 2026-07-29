@@ -45,6 +45,7 @@ const mocks = vi.hoisted(() => ({
   attachTalkRealtimeRelayImage: vi.fn(() => ({ accepted: true })),
   cancelTalkRealtimeRelayTurn: vi.fn(),
   stopTalkRealtimeRelaySession: vi.fn(),
+  acknowledgeTalkRealtimeRelayAgentConsult: vi.fn(() => true),
   registerTalkRealtimeRelayAgentRun: vi.fn(),
   runTalkRealtimeGatewayTool: vi.fn(),
   submitTalkRealtimeRelayToolResult: vi.fn(),
@@ -54,7 +55,9 @@ const mocks = vi.hoisted(() => ({
   stopTalkTranscriptionRelaySession: vi.fn(),
   chatAbort: vi.fn(),
   chatSend: vi.fn(),
+  captureSubagentCompletionReply: vi.fn(),
   forkSessionEntryFromParent: vi.fn(),
+  registerAgentRunAdmissionOverride: vi.fn(() => () => undefined),
   controlRealtimeVoiceAgentRun: vi.fn(),
   steerTalkRealtimeRelayAgentRun: vi.fn(),
   resolveSessionKeyFromResolveParams: vi.fn(),
@@ -99,6 +102,18 @@ vi.mock("../../auto-reply/reply/session-fork.js", () => ({
   forkSessionEntryFromParent: mocks.forkSessionEntryFromParent,
 }));
 
+vi.mock("../../agents/agent-run-admission.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../agents/agent-run-admission.js")>();
+  return {
+    ...actual,
+    registerAgentRunAdmissionOverride: mocks.registerAgentRunAdmissionOverride,
+  };
+});
+
+vi.mock("../../agents/subagent-announce-output.js", () => ({
+  captureSubagentCompletionReply: mocks.captureSubagentCompletionReply,
+}));
+
 vi.mock("./chat.js", () => ({
   chatHandlers: {
     "chat.abort": mocks.chatAbort,
@@ -115,6 +130,7 @@ vi.mock("../talk-realtime-relay.js", async (importOriginal) => {
   return {
     ...actual,
     cancelTalkRealtimeRelayTurn: mocks.cancelTalkRealtimeRelayTurn,
+    acknowledgeTalkRealtimeRelayAgentConsult: mocks.acknowledgeTalkRealtimeRelayAgentConsult,
     attachTalkRealtimeRelayImage: mocks.attachTalkRealtimeRelayImage,
     createTalkRealtimeRelaySession: mocks.createTalkRealtimeRelaySession,
     registerTalkRealtimeRelayAgentRun: mocks.registerTalkRealtimeRelayAgentRun,
@@ -2332,6 +2348,7 @@ describe("talk.client.toolCall handler", () => {
     resetTaskRegistryForTests({ persist: false });
     installInMemoryTaskRegistryRuntime();
     mocks.forkSessionEntryFromParent.mockResolvedValue({ status: "missing-parent" });
+    mocks.captureSubagentCompletionReply.mockResolvedValue("Agent consult result.");
     mocks.chatSend.mockImplementation(
       async ({
         respond,
@@ -2484,6 +2501,16 @@ describe("talk.client.toolCall handler", () => {
       label: "What is in this repo?",
       progressSummary: "Queued for background admission.",
     });
+    const admissionOptions = mockCallArg(mocks.registerAgentRunAdmissionOverride, 0, 1) as {
+      onQueueReason?: (reason: { code: string; detail: string }) => void;
+    };
+    admissionOptions.onQueueReason?.({
+      code: "resource_conflict",
+      detail: "Waiting for a read lock.",
+    });
+    expect(getTaskById(receipt.jobId)).toMatchObject({
+      progressSummary: "Waiting for a read lock.",
+    });
   });
 
   it("terminalizes an accepted consult when its gateway run controller is missing", async () => {
@@ -2509,8 +2536,8 @@ describe("talk.client.toolCall handler", () => {
 
     const response = expectRespondOk(respond) as { receipt: { jobId: string } };
     expect(getTaskById(response.receipt.jobId)).toMatchObject({
-      status: "failed",
-      error: expect.stringContaining("lost its in-process run controller"),
+      status: "lost",
+      error: expect.stringContaining("unknown_outcome"),
     });
   });
 
@@ -2554,6 +2581,103 @@ describe("talk.client.toolCall handler", () => {
       },
     });
     finishRun?.();
+  });
+
+  it("releases the relay voice lane before queued chat admission completes", async () => {
+    let admitRun: (() => void) | undefined;
+    mocks.chatSend.mockImplementationOnce(
+      ({ respond }: { respond: (ok: boolean, result?: unknown, error?: unknown) => void }) =>
+        new Promise<void>((resolve) => {
+          admitRun = () => {
+            respond(true, { runId: "run-queued" }, undefined);
+            resolve();
+          };
+        }),
+    );
+    const respond = vi.fn();
+
+    const handling = talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "queued", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        relaySessionId: "relay-queued",
+        callId: "call-queued",
+        name: "openclaw_agent_consult",
+        args: { question: "Wait for the shared resource" },
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {
+        getRuntimeConfig: () => ({}) as OpenClawConfig,
+        logGateway: { warn: vi.fn() },
+      } as never,
+    });
+
+    await vi.waitFor(() =>
+      expect(mocks.acknowledgeTalkRealtimeRelayAgentConsult).toHaveBeenCalledWith({
+        relaySessionId: "relay-queued",
+        connId: "conn-1",
+        callId: "call-queued",
+      }),
+    );
+    expect(respond).not.toHaveBeenCalled();
+
+    admitRun?.();
+    await handling;
+
+    expectRespondOk(respond, { runId: "run-queued" });
+    expect(mocks.registerTalkRealtimeRelayAgentRun).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run-queued" }),
+    );
+  });
+
+  it("delivers a terminal failure when an acknowledged relay consult cannot start", async () => {
+    mocks.chatSend.mockImplementationOnce(
+      async ({
+        respond,
+      }: {
+        respond: (ok: boolean, result?: unknown, error?: unknown) => void;
+      }) => {
+        respond(false, undefined, {
+          code: ErrorCodes.UNAVAILABLE,
+          message: "Background admission failed.",
+        });
+      },
+    );
+    const respond = vi.fn();
+
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "failed", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        relaySessionId: "relay-failed",
+        callId: "call-failed",
+        name: "openclaw_agent_consult",
+        args: { question: "Start this background task" },
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {
+        getRuntimeConfig: () => ({}) as OpenClawConfig,
+        logGateway: { warn: vi.fn() },
+      } as never,
+    });
+
+    expectRespondError(respond, {
+      code: ErrorCodes.UNAVAILABLE,
+      message: "Background admission failed.",
+    });
+    const admissionOptions = mockCallArg(mocks.registerAgentRunAdmissionOverride, 0, 1) as {
+      jobId: string;
+    };
+    const task = getTaskById(admissionOptions.jobId);
+    expect(task).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("Background admission failed."),
+    });
+    expect(task?.deliveryStatus).not.toBe("not_applicable");
   });
 
   it("cancels the accepted chat run by durable receipt job id", async () => {
@@ -2688,9 +2812,71 @@ describe("talk.client.toolCall handler", () => {
     });
     chatAbortControllers.get(response.receipt.runId)?.onRemoved?.();
 
-    expect(getTaskById(response.receipt.jobId)).toMatchObject({
-      status: "succeeded",
-      deliveryStatus: "not_applicable",
+    await vi.waitFor(() => {
+      expect(getTaskById(response.receipt.jobId)).toMatchObject({
+        status: "succeeded",
+        terminalSummary: "Agent consult result.",
+      });
+    });
+  });
+
+  it("fails an accepted consult that terminalizes without a reply or artifact", async () => {
+    const chatAbortControllers = new Map<string, { onRemoved?: () => void }>();
+    const dedupe = new Map<string, unknown>();
+    mocks.captureSubagentCompletionReply.mockResolvedValueOnce(undefined);
+    mocks.chatSend.mockImplementationOnce(
+      ({
+        context,
+        params,
+        respond,
+      }: {
+        context: { chatAbortControllers: typeof chatAbortControllers };
+        params: { idempotencyKey: string };
+        respond: (ok: boolean, result?: unknown, error?: unknown) => void;
+      }) => {
+        context.chatAbortControllers.set(params.idempotencyKey, {});
+        respond(true, { runId: params.idempotencyKey }, undefined);
+      },
+    );
+    const respond = vi.fn();
+
+    await talkHandlers["talk.client.toolCall"]({
+      req: { type: "req", id: "empty-terminal", method: "talk.client.toolCall" },
+      params: {
+        sessionKey: "main",
+        callId: "call-empty-terminal",
+        name: "openclaw_agent_consult",
+        args: { question: "Create the requested artifact" },
+      },
+      client: { connId: "conn-1" } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: {
+        getRuntimeConfig: () => ({}) as OpenClawConfig,
+        chatAbortControllers,
+        dedupe,
+      } as never,
+    });
+
+    const response = expectRespondOk(respond) as {
+      receipt: { jobId: string; runId: string };
+    };
+    dedupe.set(`chat:${response.receipt.runId}`, {
+      ts: Date.now(),
+      ok: true,
+      payload: {
+        runId: response.receipt.runId,
+        status: "ok",
+        endedAt: Date.now(),
+      },
+    });
+    chatAbortControllers.get(response.receipt.runId)?.onRemoved?.();
+
+    await vi.waitFor(() => {
+      expect(getTaskById(response.receipt.jobId)).toMatchObject({
+        status: "failed",
+        error: expect.stringContaining("completed_without_reply"),
+      });
     });
   });
 
@@ -2750,6 +2936,11 @@ describe("talk.client.toolCall handler", () => {
     const workerSessionKey = (mockCallArg(mocks.chatSend) as { params: { sessionKey: string } })
       .params.sessionKey;
     expect(workerSessionKey).toMatch(/^agent:main:talk-job:/);
+    expect(mocks.acknowledgeTalkRealtimeRelayAgentConsult).toHaveBeenCalledWith({
+      relaySessionId: "relay-1",
+      connId: "conn-1",
+      callId: "call-1",
+    });
     expect(mocks.registerTalkRealtimeRelayAgentRun).toHaveBeenCalledWith({
       relaySessionId: "relay-1",
       connId: "conn-1",

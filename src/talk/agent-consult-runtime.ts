@@ -21,6 +21,7 @@ import {
   setDetachedTaskDeliveryStatusByRunId,
 } from "../tasks/detached-task-runtime.js";
 import { maybeDeliverTaskTerminalUpdate } from "../tasks/runtime-internal.js";
+import { formatCompletedWithoutReplyError } from "../tasks/task-completion-contract.js";
 import { formatTaskStatusTitleText } from "../tasks/task-status.js";
 import {
   deliveryContextFromSession,
@@ -29,6 +30,7 @@ import {
 } from "../utils/delivery-context.shared.js";
 import {
   buildRealtimeVoiceAgentConsultPrompt,
+  collectRealtimeVoiceAgentConsultArtifactReferences,
   collectRealtimeVoiceAgentConsultVisibleText,
   parseRealtimeVoiceAgentConsultArgs,
   type RealtimeVoiceAgentConsultTranscriptEntry,
@@ -489,9 +491,25 @@ export async function consultRealtimeVoiceAgent(params: {
             );
           }
 
-          const text = collectRealtimeVoiceAgentConsultVisibleText(result.payloads ?? []);
+          const payloads = result.payloads ?? [];
+          const text = collectRealtimeVoiceAgentConsultVisibleText(payloads);
+          const artifactReferences = collectRealtimeVoiceAgentConsultArtifactReferences(payloads);
           let answer =
-            text ?? params.fallbackText ?? "I need a moment to verify that before answering.";
+            text ??
+            (artifactReferences.length > 0
+              ? `The requested artifact is ready: ${artifactReferences.join(", ")}`
+              : undefined);
+          if (!answer) {
+            params.logger.warn(
+              "[talk] agent consult produced no answer: agent returned no speakable text",
+            );
+            return finalizeFailure(
+              "failed",
+              formatCompletedWithoutReplyError(
+                "Agent run completed without a visible reply or artifact.",
+              ),
+            );
+          }
           if (params.freshnessDeadlineAtMs !== undefined) {
             const freshness = await resolveAgentResultFreshness({
               jobId: task.taskId,
@@ -505,11 +523,6 @@ export async function consultRealtimeVoiceAgent(params: {
             } else {
               answer = freshness.value;
             }
-          }
-          if (!text) {
-            params.logger.warn(
-              "[talk] agent consult produced no answer: agent returned no speakable text",
-            );
           }
           finalizeTaskRunByRunId({
             runId,

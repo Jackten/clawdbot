@@ -639,29 +639,66 @@ describe("realtime voice agent consult runtime", () => {
     expect(call.agentId).toBe("voice");
   });
 
-  it("returns a speakable fallback when the embedded agent has no visible text", async () => {
+  it("fails visibly when the embedded agent completes without a reply or artifact", async () => {
     const warn = vi.fn();
     const { runtime } = createAgentRuntime([{ text: "hidden", isReasoning: true }]);
+
+    await expect(
+      consultRealtimeVoiceAgent({
+        cfg: {} as never,
+        agentRuntime: runtime as never,
+        logger: { warn },
+        sessionKey: "google-meet:meet-1",
+        messageProvider: "google-meet",
+        lane: "google-meet",
+        runIdPrefix: "google-meet:meet-1",
+        args: { question: "What now?" },
+        transcript: [],
+        surface: "a private Google Meet",
+        userLabel: "Participant",
+        fallbackText: "Let me verify that first.",
+      }),
+    ).rejects.toThrow("completed_without_reply");
+
+    expect(warn).toHaveBeenCalledWith(
+      "[talk] agent consult produced no answer: agent returned no speakable text",
+    );
+    expect(listTasksForOwnerKey("google-meet:meet-1")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("completed_without_reply"),
+      }),
+    ]);
+  });
+
+  it("preserves a generated PDF reference when the delegated reply has no text", async () => {
+    const { runtime } = createAgentRuntime([
+      { mediaUrls: ["https://files.example/date-plan.pdf"] },
+    ]);
 
     const result = await consultRealtimeVoiceAgent({
       cfg: {} as never,
       agentRuntime: runtime as never,
-      logger: { warn },
-      sessionKey: "google-meet:meet-1",
-      messageProvider: "google-meet",
-      lane: "google-meet",
-      runIdPrefix: "google-meet:meet-1",
-      args: { question: "What now?" },
+      logger: { warn: vi.fn() },
+      sessionKey: "voice:artifact",
+      messageProvider: "voice",
+      lane: "voice",
+      runIdPrefix: "voice-artifact",
+      args: { question: "Create the date-plan PDF" },
       transcript: [],
-      surface: "a private Google Meet",
-      userLabel: "Participant",
-      fallbackText: "Let me verify that first.",
+      surface: "a live call",
+      userLabel: "Caller",
     });
 
-    expect(result).toEqual({ text: "Let me verify that first." });
-    expect(warn).toHaveBeenCalledWith(
-      "[talk] agent consult produced no answer: agent returned no speakable text",
-    );
+    expect(result).toEqual({
+      text: "The requested artifact is ready: https://files.example/date-plan.pdf",
+    });
+    expect(listTasksForOwnerKey("voice:artifact")).toEqual([
+      expect.objectContaining({
+        status: "succeeded",
+        terminalSummary: "The requested artifact is ready: https://files.example/date-plan.pdf",
+      }),
+    ]);
   });
 
   it("forks requester context when fork mode has a parent session", async () => {

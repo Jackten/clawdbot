@@ -505,9 +505,12 @@ function submitRelayAgentControlProviderResults(
       // cancelling must satisfy every native id or the provider keeps waiting.
       session.forcedConsults.markCancelled(forcedConsult);
       for (const nativeCallId of session.forcedConsults.nativeCallIds(forcedConsult)) {
-        session.bridge.submitToolResult(nativeCallId, result.providerResult, {
-          suppressResponse: true,
-        });
+        if (!session.completedAgentToolCalls.has(nativeCallId)) {
+          session.bridge.submitToolResult(nativeCallId, result.providerResult, {
+            suppressResponse: true,
+          });
+          session.completedAgentToolCalls.add(nativeCallId);
+        }
       }
     } else {
       session.bridge.submitToolResult(callId, result.providerResult, { suppressResponse: true });
@@ -799,7 +802,6 @@ export function createTalkRealtimeRelaySession(
           }
           return;
         }
-        submitRealtimeAgentConsultWorkingResponse(relay, toolCall.callId, turnId);
       }
       const gatewayTool = gatewayToolsByName.get(toolCall.name);
       if (relay && gatewayTool) {
@@ -1027,7 +1029,10 @@ function submitAlreadyDeliveredToolResult(
   turnId = ensureRelayTurn(session),
 ): void {
   const result = buildAlreadyDeliveredToolResult();
-  session.bridge.submitToolResult(callId, result, { suppressResponse: true });
+  if (!session.completedAgentToolCalls.has(callId)) {
+    session.bridge.submitToolResult(callId, result, { suppressResponse: true });
+    session.completedAgentToolCalls.add(callId);
+  }
   broadcastToOwner(session.context, session.connId, {
     relaySessionId: session.id,
     type: "toolResult",
@@ -1047,21 +1052,27 @@ function submitRealtimeAgentConsultWorkingResponse(
   callId: string,
   turnId = ensureRelayTurn(session),
 ): void {
-  if (!session.bridge.bridge.supportsToolResultContinuation) {
-    return;
-  }
-  session.bridge.submitToolResult(callId, buildRealtimeVoiceAgentConsultWorkingResponse("person"), {
-    willContinue: true,
-  });
+  // The durable task owns the eventual result. Finalizing the provider tool
+  // call here releases the realtime response lane for the next voice turn.
+  session.bridge.submitToolResult(
+    callId,
+    buildRealtimeVoiceAgentConsultWorkingResponse("person"),
+    undefined,
+  );
+  session.completedAgentToolCalls.add(callId);
   broadcastToOwner(session.context, session.connId, {
     relaySessionId: session.id,
     type: "toolResult",
     callId,
     talkEvent: session.talk.emit({
-      type: "tool.progress",
+      type: "tool.result",
       callId,
       turnId,
-      payload: { name: REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME, status: "working" },
+      payload: {
+        name: REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+        result: buildRealtimeVoiceAgentConsultWorkingResponse("person"),
+      },
+      final: true,
     }),
   });
 }
@@ -1225,6 +1236,25 @@ export function submitTalkRealtimeRelayToolResult(params: {
   });
 }
 
+/** Releases a native realtime consult tool call after its durable task is persisted. */
+export function acknowledgeTalkRealtimeRelayAgentConsult(params: {
+  relaySessionId: string;
+  connId: string;
+  callId: string;
+}): boolean {
+  const session = getRelaySession(params.relaySessionId, params.connId);
+  const callId = params.callId.trim();
+  if (!callId || session.completedAgentToolCalls.has(callId)) {
+    return false;
+  }
+  const forcedConsult = session.forcedConsults.handles().find((handle) => handle.id === callId);
+  if (!forcedConsult) {
+    submitRealtimeAgentConsultWorkingResponse(session, callId);
+    return true;
+  }
+  return false;
+}
+
 /** Tracks the chat run started for a realtime agent-consult tool call. */
 export function registerTalkRealtimeRelayAgentRun(params: {
   relaySessionId: string;
@@ -1235,8 +1265,9 @@ export function registerTalkRealtimeRelayAgentRun(params: {
 }): void {
   const session = getRelaySession(params.relaySessionId, params.connId);
   session.activeAgentRuns.set(params.runId, params.sessionKey);
-  if (params.callId?.trim()) {
-    session.activeAgentToolCalls.set(params.callId.trim(), params.runId);
+  const callId = params.callId?.trim();
+  if (callId && !session.completedAgentToolCalls.has(callId)) {
+    session.activeAgentToolCalls.set(callId, params.runId);
   }
   if (!session.sessionKey) {
     session.sessionKey = params.sessionKey;

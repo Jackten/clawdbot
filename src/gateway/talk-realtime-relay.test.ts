@@ -16,6 +16,7 @@ const transcriptPersistenceMocks = vi.hoisted(() => ({
 vi.mock("../talk/realtime-transcript-persistence.js", () => transcriptPersistenceMocks);
 
 import {
+  acknowledgeTalkRealtimeRelayAgentConsult,
   attachTalkRealtimeRelayImage,
   cancelTalkRealtimeRelayTurn,
   clearTalkRealtimeRelaySessionsForTest,
@@ -586,6 +587,7 @@ describe("talk realtime gateway relay", () => {
       opts?: { dropIfSlow?: boolean };
     }> = [];
     const context = {
+      chatAbortControllers: new Map(),
       broadcastToConnIds: (
         event: string,
         payload: unknown,
@@ -724,6 +726,18 @@ describe("talk realtime gateway relay", () => {
       payload: { name: "phone_vibrate", args: { pattern: "success" } },
     });
 
+    acknowledgeTalkRealtimeRelayAgentConsult({
+      relaySessionId: session.relaySessionId,
+      connId: "conn-1",
+      callId: "call-1",
+    });
+    registerTalkRealtimeRelayAgentRun({
+      relaySessionId: session.relaySessionId,
+      connId: "conn-1",
+      sessionKey: "agent:main:talk-job:test",
+      runId: "run-agent-consult",
+      callId: "call-1",
+    });
     sendTalkRealtimeRelayAudio({
       relaySessionId: session.relaySessionId,
       connId: "conn-1",
@@ -767,23 +781,17 @@ describe("talk realtime gateway relay", () => {
         status: "working",
         tool: "openclaw_agent_consult",
         message:
-          "Tell the person briefly that you are checking, then wait for the final OpenClaw result before answering with the actual result.",
+          "Tell the person briefly that the work is continuing in the background, then stay available for their next request. OpenClaw will deliver the final result separately.",
       },
-      { willContinue: true },
+      undefined,
     );
     expect(bridge.submitToolResult).toHaveBeenNthCalledWith(
       2,
-      "call-1",
-      { status: "working" },
-      { willContinue: true },
-    );
-    expect(bridge.submitToolResult).toHaveBeenNthCalledWith(3, "call-1", { ok: true }, undefined);
-    expect(bridge.submitToolResult).toHaveBeenNthCalledWith(
-      4,
       "call-client-1",
       "vibration complete",
       { suppressResponse: true },
     );
+    expect(bridge.submitToolResult).toHaveBeenCalledTimes(2);
     expect(bridge.handleBargeIn).toHaveBeenCalledWith({ audioPlaybackActive: true });
     expect(bridge.close).toHaveBeenCalled();
     const inputAudioPayload = findEventPayload(
@@ -818,33 +826,13 @@ describe("talk realtime gateway relay", () => {
           (payload as Record<string, unknown>).type === "toolResult" &&
           (payload as Record<string, unknown>).callId === "call-1",
       );
-    expect(toolResultPayloads).toHaveLength(3);
+    expect(toolResultPayloads).toHaveLength(1);
     expectRecordFields(toolResultPayloads[0], {
       relaySessionId: session.relaySessionId,
       type: "toolResult",
       callId: "call-1",
     });
     expectRecordFields(toolResultPayloads[0]?.talkEvent, {
-      type: "tool.progress",
-      callId: "call-1",
-      payload: { name: "openclaw_agent_consult", status: "working" },
-    });
-    expectRecordFields(toolResultPayloads[1], {
-      relaySessionId: session.relaySessionId,
-      type: "toolResult",
-      callId: "call-1",
-    });
-    expectRecordFields(toolResultPayloads[1]?.talkEvent, {
-      type: "tool.result",
-      callId: "call-1",
-      final: false,
-    });
-    expectRecordFields(toolResultPayloads[2], {
-      relaySessionId: session.relaySessionId,
-      type: "toolResult",
-      callId: "call-1",
-    });
-    expectRecordFields(toolResultPayloads[2]?.talkEvent, {
       type: "tool.result",
       callId: "call-1",
       final: true,
@@ -984,6 +972,7 @@ describe("talk realtime gateway relay", () => {
     };
     const events: Array<{ event: string; payload: unknown; connIds: string[] }> = [];
     const context = {
+      chatAbortControllers: new Map(),
       broadcastToConnIds: (event: string, payload: unknown, connIds: ReadonlySet<string>) => {
         events.push({ event, payload, connIds: [...connIds] });
       },
@@ -1284,6 +1273,7 @@ describe("talk realtime gateway relay", () => {
     };
     const events: Array<{ event: string; payload: unknown; connIds: string[] }> = [];
     const context = {
+      chatAbortControllers: new Map(),
       broadcastToConnIds: (event: string, payload: unknown, connIds: ReadonlySet<string>) => {
         events.push({ event, payload, connIds: [...connIds] });
       },
@@ -1354,9 +1344,9 @@ describe("talk realtime gateway relay", () => {
         status: "working",
         tool: "openclaw_agent_consult",
         message:
-          "Tell the person briefly that you are checking, then wait for the final OpenClaw result before answering with the actual result.",
+          "Tell the person briefly that the work is continuing in the background, then stay available for their next request. OpenClaw will deliver the final result separately.",
       },
-      { willContinue: true },
+      undefined,
     );
 
     submitTalkRealtimeRelayToolResult({
@@ -1368,10 +1358,12 @@ describe("talk realtime gateway relay", () => {
     expect(bridge.submitToolResult).toHaveBeenLastCalledWith(
       "native-call",
       {
-        status: "already_delivered",
-        message: "OpenClaw already delivered this consult result internally. Do not repeat it.",
+        status: "working",
+        tool: "openclaw_agent_consult",
+        message:
+          "Tell the person briefly that the work is continuing in the background, then stay available for their next request. OpenClaw will deliver the final result separately.",
       },
-      { suppressResponse: true },
+      undefined,
     );
     expect(bridge.sendUserMessage).toHaveBeenLastCalledWith(
       [
@@ -1408,15 +1400,27 @@ describe("talk realtime gateway relay", () => {
       name: "openclaw_agent_consult",
       args: { question: "Can you check something else?" },
     });
+    acknowledgeTalkRealtimeRelayAgentConsult({
+      relaySessionId: session.relaySessionId,
+      connId: "conn-1",
+      callId: "native-other-call",
+    });
+    registerTalkRealtimeRelayAgentRun({
+      relaySessionId: session.relaySessionId,
+      connId: "conn-1",
+      sessionKey: "agent:main:talk-job:native-other",
+      runId: "run-native-other",
+      callId: "native-other-call",
+    });
     expect(bridge.submitToolResult).toHaveBeenLastCalledWith(
       "native-other-call",
       {
         status: "working",
         tool: "openclaw_agent_consult",
         message:
-          "Tell the person briefly that you are checking, then wait for the final OpenClaw result before answering with the actual result.",
+          "Tell the person briefly that the work is continuing in the background, then stay available for their next request. OpenClaw will deliver the final result separately.",
       },
-      { willContinue: true },
+      undefined,
     );
     const nativeOtherToolCall = findEventPayload(
       events,

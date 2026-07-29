@@ -13,6 +13,7 @@ import {
 } from "../agents/agent-run-admission.js";
 import { buildAgentRunTerminalOutcomeFromWaitResult } from "../agents/agent-run-terminal-outcome.js";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
+import { captureSubagentCompletionReply } from "../agents/subagent-announce-output.js";
 import { forkSessionEntryFromParent } from "../auto-reply/reply/session-fork.js";
 import { normalizeTalkSection } from "../config/talk.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
@@ -25,8 +26,12 @@ import {
   createRunningTaskRun,
   finalizeTaskRunByRunId,
   recordTaskRunProgressByRunId,
+  setDetachedTaskDeliveryStatusByRunId,
 } from "../tasks/detached-task-runtime.js";
+import { markTaskLostById, maybeDeliverTaskTerminalUpdate } from "../tasks/runtime-internal.js";
+import { formatCompletedWithoutReplyError } from "../tasks/task-completion-contract.js";
 import { formatTaskStatusTitleText } from "../tasks/task-status.js";
+import { deliveryContextFromSession } from "../utils/delivery-context.shared.js";
 import { readTerminalSnapshotFromGatewayDedupe } from "./server-methods/agent-wait-dedupe.js";
 import { chatHandlers } from "./server-methods/chat.js";
 import type {
@@ -35,7 +40,10 @@ import type {
   GatewayRequestHandlers,
 } from "./server-methods/shared-types.js";
 import { resolveSessionStoreKey } from "./session-store-key.js";
-import { registerTalkRealtimeRelayAgentRun } from "./talk-realtime-relay.js";
+import {
+  acknowledgeTalkRealtimeRelayAgentConsult,
+  registerTalkRealtimeRelayAgentRun,
+} from "./talk-realtime-relay.js";
 import { formatForLog } from "./ws-log.js";
 
 type TalkChatSendAckStatus = "started" | "in_flight" | "ok" | "timeout" | "error";
@@ -48,11 +56,12 @@ type TalkRealtimeAgentConsultReceipt = {
   state: "running";
 };
 
-function finalizeTalkRealtimeAgentConsultFromGateway(params: {
+async function finalizeTalkRealtimeAgentConsultFromGateway(params: {
   context: GatewayRequestContext;
+  taskRunId: string;
   runId: string;
   sessionKey: string;
-}): boolean {
+}): Promise<boolean> {
   if (!params.context.dedupe) {
     return false;
   }
@@ -76,18 +85,36 @@ function finalizeTalkRealtimeAgentConsultFromGateway(params: {
         : outcome.reason === "cancelled" || outcome.reason === "aborted"
           ? "cancelled"
           : "failed";
-  const error =
-    status === "succeeded"
-      ? undefined
-      : `${outcome.error ?? "Agent consult failed without a reported reason."} (run ${params.runId})`;
+  let terminalSummary: string | undefined;
+  let error: string | undefined;
+  let terminalStatus: "succeeded" | "failed" | "timed_out" | "cancelled" = status;
+  if (status === "succeeded") {
+    try {
+      terminalSummary = await captureSubagentCompletionReply(params.sessionKey, {
+        waitForReply: true,
+        outcome: { status: "ok" },
+      });
+    } catch (captureError) {
+      error = `completion_capture_failed: ${formatForLog(captureError)} (run ${params.runId})`;
+      terminalStatus = "failed";
+    }
+    if (!terminalSummary?.trim() && !error) {
+      error = `${formatCompletedWithoutReplyError(
+        "Agent consult completed without a visible reply or artifact.",
+      )} (run ${params.runId})`;
+      terminalStatus = "failed";
+    }
+  } else {
+    error = `${outcome.error ?? "Agent consult failed without a reported reason."} (run ${params.runId})`;
+  }
   finalizeTaskRunByRunId({
-    runId: params.runId,
+    runId: params.taskRunId,
     runtime: "cli",
     sessionKey: params.sessionKey,
-    status,
+    status: terminalStatus,
     endedAt: outcome.endedAt ?? Date.now(),
-    ...(error ? { error, terminalSummary: error } : {}),
-    suppressDelivery: true,
+    ...(error ? { error, terminalSummary: error } : { terminalSummary }),
+    ...(terminalStatus === "succeeded" ? { terminalOutcome: "succeeded" as const } : {}),
   });
   return true;
 }
@@ -204,6 +231,7 @@ export async function startTalkRealtimeAgentConsult(params: {
     return { ok: false, error: errorShape(ErrorCodes.INVALID_REQUEST, formatForLog(err)) };
   }
   const idempotencyKey = `talk-${params.callId}-${randomUUID()}`;
+  const taskRunId = `talk-task-${params.callId}-${randomUUID()}`;
   const parsedArgs = parseRealtimeVoiceAgentConsultArgs(params.args);
   const cfg = params.context.getRuntimeConfig();
   const agentId = parseAgentSessionKey(params.sessionKey)?.agentId ?? resolveDefaultAgentId(cfg);
@@ -212,6 +240,7 @@ export async function startTalkRealtimeAgentConsult(params: {
     cfg,
     sessionKey: params.sessionKey,
   });
+  let requesterOrigin;
   try {
     const forkResult = await forkSessionEntryFromParent({
       parentSessionKey,
@@ -243,6 +272,9 @@ export async function startTalkRealtimeAgentConsult(params: {
         ),
       };
     }
+    if (forkResult.status === "forked" || forkResult.status === "skipped") {
+      requesterOrigin = deliveryContextFromSession(forkResult.sessionEntry);
+    }
   } catch (error) {
     return {
       ok: false,
@@ -256,15 +288,16 @@ export async function startTalkRealtimeAgentConsult(params: {
     requesterSessionKey: params.sessionKey,
     ownerKey: params.sessionKey,
     scopeKind: "session",
+    requesterOrigin,
     childSessionKey: workerSessionKey,
     agentId,
-    runId: idempotencyKey,
+    runId: taskRunId,
     label: title,
     task: parsedArgs.question,
     progressSummary: "Queued for background admission.",
-    // chat.send owns the one terminal result publication. The ledger records
-    // lifecycle/status only, avoiding a second delivery for the same run.
-    notifyPolicy: "silent",
+    // The provider receives a final acknowledgement immediately. The durable
+    // task is the sole owner of the later terminal result.
+    notifyPolicy: "done_only",
     deliveryStatus: "not_applicable",
   });
   if (!task) {
@@ -282,7 +315,7 @@ export async function startTalkRealtimeAgentConsult(params: {
     resourceScope: deriveAgentRunResourceScope({ request: parsedArgs.question }),
     onQueueReason: (reason) => {
       recordTaskRunProgressByRunId({
-        runId: idempotencyKey,
+        runId: taskRunId,
         runtime: "cli",
         sessionKey: workerSessionKey,
         lastEventAt: Date.now(),
@@ -291,18 +324,45 @@ export async function startTalkRealtimeAgentConsult(params: {
       });
     },
   });
-  const finalizeUnstartedTask = (error: ErrorShape) => {
+  let relayAcknowledged = false;
+  if (params.relaySessionId && params.connId) {
+    try {
+      relayAcknowledged = acknowledgeTalkRealtimeRelayAgentConsult({
+        relaySessionId: params.relaySessionId,
+        connId: params.connId,
+        callId: params.callId,
+      });
+    } catch (error) {
+      params.context.logGateway.warn(
+        `realtime Talk agent consult acknowledgement failed: ${formatForLog(error)}`,
+      );
+    }
+  }
+  const finalizeUnstartedTask = async (error: ErrorShape) => {
     unregisterAdmission();
-    finalizeTaskRunByRunId({
-      runId: idempotencyKey,
+    if (relayAcknowledged) {
+      setDetachedTaskDeliveryStatusByRunId({
+        runId: taskRunId,
+        runtime: "cli",
+        sessionKey: workerSessionKey,
+        deliveryStatus: "pending",
+      });
+    }
+    const finalizedTasks = finalizeTaskRunByRunId({
+      runId: taskRunId,
       runtime: "cli",
       sessionKey: workerSessionKey,
       status: "failed",
       endedAt: Date.now(),
       error: `${error.message} (run ${idempotencyKey})`,
       terminalSummary: `${error.message} (run ${idempotencyKey})`,
-      suppressDelivery: true,
+      suppressDelivery: !relayAcknowledged,
     });
+    if (relayAcknowledged) {
+      await Promise.all(
+        finalizedTasks.map((finalizedTask) => maybeDeliverTaskTerminalUpdate(finalizedTask.taskId)),
+      );
+    }
   };
   const normalizedTalk = normalizeTalkSection(cfg.talk);
   const chatResponse = await new Promise<
@@ -368,17 +428,17 @@ export async function startTalkRealtimeAgentConsult(params: {
       ErrorCodes.UNAVAILABLE,
       "chat.send did not return a realtime tool result",
     );
-    finalizeUnstartedTask(error);
+    await finalizeUnstartedTask(error);
     return { ok: false, error };
   }
   if (!chatResponse.ok) {
-    finalizeUnstartedTask(chatResponse.error);
+    await finalizeUnstartedTask(chatResponse.error);
     return { ok: false, error: chatResponse.error };
   }
   const result = chatResponse.result;
   const terminalAckError = terminalTalkChatSendAckError(normalizeTalkChatSendAckStatus(result));
   if (terminalAckError) {
-    finalizeUnstartedTask(terminalAckError);
+    await finalizeUnstartedTask(terminalAckError);
     return { ok: false, error: terminalAckError };
   }
   const runId =
@@ -388,7 +448,7 @@ export async function startTalkRealtimeAgentConsult(params: {
         : idempotencyKey
       : idempotencyKey;
   const unregisterCancellation = registerActiveCliTaskRun({
-    runId: idempotencyKey,
+    runId: taskRunId,
     cancel: () =>
       abortTalkRealtimeAgentConsult({
         context: params.context,
@@ -410,8 +470,9 @@ export async function startTalkRealtimeAgentConsult(params: {
         unregisterAdmission();
         // Most chat runs terminalize the ledger through lifecycle events. The
         // terminal dedupe record covers valid no-lifecycle completion paths.
-        finalizeTalkRealtimeAgentConsultFromGateway({
+        void finalizeTalkRealtimeAgentConsultFromGateway({
           context: params.context,
+          taskRunId,
           runId,
           sessionKey: workerSessionKey,
         });
@@ -424,26 +485,31 @@ export async function startTalkRealtimeAgentConsult(params: {
     // contexts may omit it; only a present map can prove the accepted run lost
     // its in-process owner.
     if (params.context.chatAbortControllers) {
-      const finalizedFromGateway = finalizeTalkRealtimeAgentConsultFromGateway({
+      const finalizedFromGateway = await finalizeTalkRealtimeAgentConsultFromGateway({
         context: params.context,
+        taskRunId,
         runId,
         sessionKey: workerSessionKey,
       });
       if (!finalizedFromGateway) {
-        const error = `Realtime agent consult lost its in-process run controller after acceptance (run ${runId}).`;
-        finalizeTaskRunByRunId({
-          runId: idempotencyKey,
-          runtime: "cli",
-          sessionKey: workerSessionKey,
-          status: "failed",
+        const error = `unknown_outcome: Realtime agent consult lost its in-process run controller after acceptance (run ${runId}).`;
+        markTaskLostById({
+          taskId: task.taskId,
           endedAt: Date.now(),
           error,
-          terminalSummary: error,
-          suppressDelivery: true,
         });
       }
     }
   }
+  const armedTasks = setDetachedTaskDeliveryStatusByRunId({
+    runId: taskRunId,
+    runtime: "cli",
+    sessionKey: workerSessionKey,
+    deliveryStatus: "pending",
+  });
+  await Promise.all(
+    armedTasks.map((armedTask) => maybeDeliverTaskTerminalUpdate(armedTask.taskId)),
+  );
   if (params.relaySessionId && params.connId) {
     registerTalkRealtimeRelayAgentRun({
       relaySessionId: params.relaySessionId,

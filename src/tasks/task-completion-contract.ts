@@ -2,6 +2,14 @@
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { TaskTerminalOutcome } from "./task-registry.types.js";
 
+/** Stable failure code for a terminal run that produced no user-visible result. */
+export const COMPLETED_WITHOUT_REPLY_ERROR_CODE = "completed_without_reply";
+
+/** Prefix a human-readable terminal failure with the stable empty-result code. */
+export function formatCompletedWithoutReplyError(detail: string): string {
+  return `${COMPLETED_WITHOUT_REPLY_ERROR_CODE}: ${detail}`;
+}
+
 /** Terminal fields required when a mandatory detached task completion is invalid. */
 export type RequiredCompletionTerminalResult = {
   terminalOutcome?: Extract<TaskTerminalOutcome, "blocked">;

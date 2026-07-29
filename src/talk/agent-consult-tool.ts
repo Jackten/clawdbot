@@ -67,7 +67,7 @@ export function buildRealtimeVoiceAgentConsultWorkingResponse(
   return {
     status: "working",
     tool: REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
-    message: `Tell the ${audienceLabel} briefly that you are checking, then wait for the final OpenClaw result before answering with the actual result.`,
+    message: `Tell the ${audienceLabel} briefly that the work is continuing in the background, then stay available for their next request. OpenClaw will deliver the final result separately.`,
   };
 }
 
@@ -252,6 +252,34 @@ export function collectRealtimeVoiceAgentConsultVisibleText(
     }
   }
   return chunks.length > 0 ? chunks.join("\n\n").trim() : null;
+}
+
+/** Collect durable file/link references from delegated-agent reply payloads. */
+export function collectRealtimeVoiceAgentConsultArtifactReferences(
+  payloads: Array<{
+    mediaUrl?: unknown;
+    mediaUrls?: unknown;
+    isError?: boolean;
+    isReasoning?: boolean;
+  }>,
+): string[] {
+  const references = new Set<string>();
+  for (const payload of payloads) {
+    if (payload.isError || payload.isReasoning) {
+      continue;
+    }
+    const values = [
+      payload.mediaUrl,
+      ...(Array.isArray(payload.mediaUrls) ? payload.mediaUrls : []),
+    ];
+    for (const value of values) {
+      const reference = normalizeOptionalString(value);
+      if (reference) {
+        references.add(reference);
+      }
+    }
+  }
+  return [...references];
 }
 
 function readConsultStringArg(args: unknown, key: string): string | undefined {
