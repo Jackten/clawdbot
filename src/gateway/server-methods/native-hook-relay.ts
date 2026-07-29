@@ -1,10 +1,13 @@
 // Gateway RPC handler for native hook relay invocation.
 import { ErrorCodes, errorShape } from "../../../packages/gateway-protocol/src/index.js";
 import {
+  isNativeHookRelayRecoveringError,
   invokeNativeHookRelay,
   type NativeHookRelayProcessResponse,
 } from "../../agents/harness/native-hook-relay.js";
 import type { GatewayRequestHandlers } from "./types.js";
+
+const NATIVE_HOOK_RELAY_RETRY_AFTER_MS = 100;
 
 /** Gateway request handlers for invoking registered native hook relays. */
 export const nativeHookRelayHandlers: GatewayRequestHandlers = {
@@ -23,6 +26,18 @@ export const nativeHookRelayHandlers: GatewayRequestHandlers = {
       });
       respond(true, result);
     } catch (error) {
+      if (isNativeHookRelayRecoveringError(error)) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.UNAVAILABLE, error.message, {
+            details: { reason: "native-hook-relay-recovering" },
+            retryable: true,
+            retryAfterMs: NATIVE_HOOK_RELAY_RETRY_AFTER_MS,
+          }),
+        );
+        return;
+      }
       respond(
         false,
         undefined,

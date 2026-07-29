@@ -1,6 +1,7 @@
 // Native hook relay CLI tests cover relay command registration and runtime delegation.
 import { PassThrough, Readable, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
+import { GatewayClientRequestError } from "../gateway/client.js";
 import { runNativeHookRelayCli } from "./native-hook-relay-cli.js";
 
 function createReadableTextStream(text: string): NodeJS.ReadableStream {
@@ -97,6 +98,131 @@ describe("native hook relay CLI", () => {
     expect(exitCode).toBe(2);
     expect(stdout.text()).toBe("out");
     expect(stderr.text()).toBe("err");
+  });
+
+  it("retries a recovering gateway relay within the hook deadline", async () => {
+    const invokeBridge = vi.fn(async () => {
+      throw new Error("bridge unavailable");
+    });
+    const callGateway = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new GatewayClientRequestError({
+          code: "UNAVAILABLE",
+          message: "native hook relay recovering",
+          retryable: true,
+          retryAfterMs: 1,
+        }),
+      )
+      .mockResolvedValueOnce({ stdout: "recovered", stderr: "", exitCode: 0 });
+    const stdout = createWritableTextBuffer();
+    const stderr = createWritableTextBuffer();
+
+    const exitCode = await runNativeHookRelayCli(
+      {
+        provider: "codex",
+        relayId: "relay-1",
+        generation: "generation-1",
+        event: "post_tool_use",
+        timeout: "1000",
+      },
+      {
+        stdin: createReadableTextStream("{}"),
+        stdout,
+        stderr,
+        invokeBridge: invokeBridge as never,
+        callGateway: callGateway as never,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout.text()).toBe("recovered");
+    expect(stderr.text()).toBe("");
+    expect(callGateway).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    {
+      name: "non-retryable unavailable",
+      error: {
+        code: "UNAVAILABLE",
+        message: "relay unavailable",
+        retryable: false,
+      },
+    },
+    {
+      name: "retryable invalid request",
+      error: {
+        code: "INVALID_REQUEST",
+        message: "stale relay generation",
+        retryable: true,
+        retryAfterMs: 1,
+      },
+    },
+  ])("does not retry a $name Gateway error", async ({ error }) => {
+    const invokeBridge = vi.fn(async () => {
+      throw new Error("bridge unavailable");
+    });
+    const callGateway = vi.fn(async () => {
+      throw new GatewayClientRequestError(error);
+    });
+    const stderr = createWritableTextBuffer();
+
+    const exitCode = await runNativeHookRelayCli(
+      {
+        provider: "codex",
+        relayId: "relay-1",
+        generation: "generation-1",
+        event: "post_tool_use",
+        timeout: "1000",
+      },
+      {
+        stdin: createReadableTextStream("{}"),
+        stderr,
+        invokeBridge: invokeBridge as never,
+        callGateway: callGateway as never,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stderr.text()).toContain("native hook relay unavailable");
+    expect(callGateway).toHaveBeenCalledOnce();
+  });
+
+  it("bounds repeated retryable Gateway recovery errors by the hook deadline", async () => {
+    const invokeBridge = vi.fn(async () => {
+      throw new Error("bridge unavailable");
+    });
+    const callGateway = vi.fn(async () => {
+      throw new GatewayClientRequestError({
+        code: "UNAVAILABLE",
+        message: "native hook relay recovering",
+        retryable: true,
+        retryAfterMs: 1,
+      });
+    });
+    const stderr = createWritableTextBuffer();
+
+    const exitCode = await runNativeHookRelayCli(
+      {
+        provider: "codex",
+        relayId: "relay-1",
+        generation: "generation-1",
+        event: "post_tool_use",
+        timeout: "25",
+      },
+      {
+        stdin: createReadableTextStream("{}"),
+        stderr,
+        invokeBridge: invokeBridge as never,
+        callGateway: callGateway as never,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stderr.text()).toContain("native hook relay timed out");
+    expect(callGateway.mock.calls.length).toBeGreaterThan(1);
+    expect(callGateway.mock.calls.length).toBeLessThan(100);
   });
 
   it("rejects malformed timeouts before reading relay input", async () => {
@@ -224,12 +350,17 @@ describe("native hook relay CLI", () => {
       stdout: null,
     },
   ])(
-    "does not fall back to the gateway after a stale direct bridge error for $event",
+    "falls back to generation-checked Gateway handling after a stale direct bridge error for $event",
     async (testCase) => {
       const invokeBridge = vi.fn(async () => {
         throw new Error("native hook relay bridge stale registration");
       });
-      const callGateway = vi.fn(async () => ({ stdout: "unexpected", stderr: "", exitCode: 0 }));
+      const callGateway = vi.fn(async () => {
+        throw new GatewayClientRequestError({
+          code: "INVALID_REQUEST",
+          message: "native hook relay bridge stale registration",
+        });
+      });
       const stdout = createWritableTextBuffer();
       const stderr = createWritableTextBuffer();
 
@@ -257,7 +388,7 @@ describe("native hook relay CLI", () => {
       }
       expect(stderr.text()).toContain("native hook relay unavailable");
       expect(stderr.text()).toContain("native hook relay bridge stale registration");
-      expect(callGateway).not.toHaveBeenCalled();
+      expect(callGateway).toHaveBeenCalledOnce();
     },
   );
 

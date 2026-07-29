@@ -25,6 +25,8 @@ import {
   resolveNativeHookRelayDeferredToolApproval,
 } from "./native-hook-relay.js";
 
+const NATIVE_HOOK_RELAY_EXEC_PREFIX = process.platform === "win32" ? "" : "exec ";
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -246,15 +248,15 @@ describe("native hook relay registry", () => {
       },
     );
     expect(relay.commandForEvent("pre_tool_use")).toBe(
-      "/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} --generation ${relay.generation} --event pre_tool_use --timeout 1234`,
     );
     expect(relay.commandForEvent("pre_tool_use", { timeoutMs: 900 })).toBe(
-      "/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} --generation ${relay.generation} --event pre_tool_use --timeout 900`,
     );
     expect(relay.commandForEvent("pre_tool_use", { timeoutMs: 2_000 })).toBe(
-      "/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} --generation ${relay.generation} --event pre_tool_use --timeout 1234`,
     );
   });
@@ -541,7 +543,7 @@ describe("native hook relay registry", () => {
     expect(relay.shouldRelayEvent("before_agent_finalize")).toBe(false);
     expect(relay.shouldRelayEvent("permission_request")).toBe(true);
     expect(relay.commandForEvent("pre_tool_use")).toBe(
-      "/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} --generation ${relay.generation} --event pre_tool_use --pre-tool-use-unavailable noop --timeout 1234`,
     );
   });
@@ -563,7 +565,7 @@ describe("native hook relay registry", () => {
 
     expect(relay.shouldRelayEvent("pre_tool_use")).toBe(true);
     expect(relay.commandForEvent("pre_tool_use")).toBe(
-      "/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} --generation ${relay.generation} --event pre_tool_use --timeout 1234`,
     );
   });
@@ -583,7 +585,7 @@ describe("native hook relay registry", () => {
 
     expect(relay.shouldRelayEvent("pre_tool_use")).toBe(true);
     expect(relay.commandForEvent("pre_tool_use")).toBe(
-      "/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} --generation ${relay.generation} --event pre_tool_use --timeout 1234`,
     );
   });
@@ -619,7 +621,7 @@ describe("native hook relay registry", () => {
     expect(relay.shouldRelayEvent("post_tool_use")).toBe(true);
     expect(relay.shouldRelayEvent("before_agent_finalize")).toBe(false);
     expect(relay.commandForEvent("post_tool_use")).toBe(
-      "/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} --generation ${relay.generation} --event post_tool_use --timeout 1234`,
     );
   });
@@ -641,7 +643,7 @@ describe("native hook relay registry", () => {
 
     expect(relay.shouldRelayEvent("before_agent_finalize")).toBe(true);
     expect(relay.commandForEvent("before_agent_finalize")).toBe(
-      "/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} --generation ${relay.generation} --event before_agent_finalize --timeout 1234`,
     );
   });
@@ -988,6 +990,123 @@ describe("native hook relay registry", () => {
     });
 
     expect(response).toEqual({ stdout: "", stderr: "", exitCode: 0 });
+  });
+
+  it("restores an unexpectedly lost registration while its owner remains active", async () => {
+    const relay = registerNativeHookRelay({
+      provider: "codex",
+      relayId: "codex-supervised-session",
+      sessionId: "session-1",
+      runId: "run-1",
+      allowedEvents: ["post_tool_use"],
+    });
+    await waitForNativeHookRelayBridgeRecord(relay.relayId);
+
+    expect(testing.dropNativeHookRelayRegistrationForTests(relay.relayId)).toBe(true);
+    expect(testing.getNativeHookRelayRegistrationForTests(relay.relayId)).toBeUndefined();
+    await expect(
+      invokeNativeHookRelayBridge({
+        provider: "codex",
+        relayId: relay.relayId,
+        generation: relay.generation,
+        event: "post_tool_use",
+        timeoutMs: 2_000,
+        rawPayload: {
+          hook_event_name: "PostToolUse",
+          tool_name: "Bash",
+          tool_response: { output: "ok" },
+        },
+      }),
+    ).resolves.toEqual({ stdout: "", stderr: "", exitCode: 0 });
+    await expect
+      .poll(() => testing.getNativeHookRelayRegistrationForTests(relay.relayId), {
+        interval: 25,
+        timeout: 2_000,
+      })
+      .toMatchObject({ generation: relay.generation, runId: "run-1" });
+
+    expect(testing.dropNativeHookRelayRegistrationForTests(relay.relayId)).toBe(true);
+    await expect(
+      invokeNativeHookRelay({
+        provider: "codex",
+        relayId: relay.relayId,
+        generation: relay.generation,
+        event: "post_tool_use",
+        rawPayload: {
+          hook_event_name: "PostToolUse",
+          tool_name: "Bash",
+          tool_response: { output: "ok" },
+        },
+        requireGeneration: true,
+      }),
+    ).rejects.toMatchObject({ code: "NATIVE_HOOK_RELAY_RECOVERING" });
+    relay.unregister();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(testing.getNativeHookRelayRegistrationForTests(relay.relayId)).toBeUndefined();
+    expect(testing.getNativeHookRelayBridgeRecordForTests(relay.relayId)).toBeUndefined();
+  });
+
+  it("rebinds a closed relay bridge and lets the next bridge invocation finish", async () => {
+    const relay = registerNativeHookRelay({
+      provider: "codex",
+      relayId: "codex-supervised-bridge",
+      sessionId: "session-1",
+      runId: "run-1",
+      allowedEvents: ["post_tool_use"],
+    });
+    const before = await waitForNativeHookRelayBridgeRecord(relay.relayId);
+
+    await expect(testing.closeNativeHookRelayBridgeForTests(relay.relayId)).resolves.toBe(true);
+    await expect(
+      invokeNativeHookRelayBridge({
+        provider: "codex",
+        relayId: relay.relayId,
+        generation: relay.generation,
+        event: "post_tool_use",
+        timeoutMs: 2_000,
+        rawPayload: {
+          hook_event_name: "PostToolUse",
+          tool_name: "Bash",
+          tool_response: { output: "ok" },
+        },
+      }),
+    ).resolves.toEqual({ stdout: "", stderr: "", exitCode: 0 });
+
+    const after = await waitForNativeHookRelayBridgeRecord(relay.relayId);
+    expect(after.token).not.toBe(before.token);
+  });
+
+  it("does not recover a registration after its owner aborts", async () => {
+    const abortController = new AbortController();
+    const relay = registerNativeHookRelay({
+      provider: "codex",
+      relayId: "codex-aborted-supervisor",
+      sessionId: "session-1",
+      runId: "run-1",
+      signal: abortController.signal,
+      allowedEvents: ["post_tool_use"],
+    });
+    await waitForNativeHookRelayBridgeRecord(relay.relayId);
+    expect(testing.dropNativeHookRelayRegistrationForTests(relay.relayId)).toBe(true);
+
+    abortController.abort();
+    await expect(
+      invokeNativeHookRelay({
+        provider: "codex",
+        relayId: relay.relayId,
+        generation: relay.generation,
+        event: "post_tool_use",
+        rawPayload: {
+          hook_event_name: "PostToolUse",
+          tool_name: "Bash",
+          tool_response: { output: "ok" },
+        },
+        requireGeneration: true,
+      }),
+    ).rejects.toThrow("native hook relay not found");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(testing.getNativeHookRelayRegistrationForTests(relay.relayId)).toBeUndefined();
+    expect(testing.getNativeHookRelayBridgeRecordForTests(relay.relayId)).toBeUndefined();
   });
 
   it("prunes dead foreign direct bridge registry files during registration", async () => {
@@ -3420,7 +3539,23 @@ describe("native hook relay command builder", () => {
         executable: "openclaw",
       }),
     ).toBe(
-      "openclaw hooks relay --provider codex --relay-id relay-1 --generation generation-1 --event permission_request --timeout 5000",
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}openclaw hooks relay --provider codex --relay-id relay-1 --generation generation-1 --event permission_request --timeout 5000`,
+    );
+  });
+
+  it("execs niced relays so the Codex timeout owns the relay process", () => {
+    const command = buildNativeHookRelayCommand({
+      provider: "codex",
+      relayId: "relay-1",
+      event: "post_tool_use",
+      executable: "openclaw",
+      nice: 10,
+    });
+
+    expect(command).toBe(
+      process.platform === "win32"
+        ? "openclaw hooks relay --provider codex --relay-id relay-1 --event post_tool_use --timeout 5000"
+        : "exec nice -n 10 openclaw hooks relay --provider codex --relay-id relay-1 --event post_tool_use --timeout 5000",
     );
   });
 
@@ -3435,7 +3570,7 @@ describe("native hook relay command builder", () => {
         executable: "openclaw",
       }),
     ).toBe(
-      "openclaw hooks relay --provider codex --relay-id relay-1 --generation generation-1 --event pre_tool_use --pre-tool-use-unavailable noop --timeout 5000",
+      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}openclaw hooks relay --provider codex --relay-id relay-1 --generation generation-1 --event pre_tool_use --pre-tool-use-unavailable noop --timeout 5000`,
     );
   });
 });

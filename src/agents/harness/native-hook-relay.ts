@@ -95,6 +95,24 @@ export type NativeHookRelayProcessResponse = {
   failureDisposition?: Exclude<BeforeToolCallFailureDisposition, "blocked">;
 };
 
+export class NativeHookRelayRecoveringError extends Error {
+  readonly code = "NATIVE_HOOK_RELAY_RECOVERING";
+
+  constructor() {
+    super("native hook relay recovering");
+    this.name = "NativeHookRelayRecoveringError";
+  }
+}
+
+export function isNativeHookRelayRecoveringError(
+  error: unknown,
+): error is NativeHookRelayRecoveringError {
+  return (
+    error instanceof Error &&
+    (error as Partial<NativeHookRelayRecoveringError>).code === "NATIVE_HOOK_RELAY_RECOVERING"
+  );
+}
+
 export type NativeHookRelayRegistration = {
   relayId: string;
   provider: NativeHookRelayProvider;
@@ -229,6 +247,8 @@ const MAX_NATIVE_HOOK_BRIDGE_BODY_BYTES = 5_000_000;
 const MAX_NATIVE_HOOK_BRIDGE_RESPONSE_BYTES = 5_000_000;
 const NATIVE_HOOK_BRIDGE_RETRY_INTERVAL_MS = 25;
 const NATIVE_HOOK_BRIDGE_REPLACEMENT_RECORD_GRACE_MS = 250;
+const NATIVE_HOOK_RELAY_RECOVERY_DELAY_MS = 100;
+const NATIVE_HOOK_RELAY_RECOVERY_MAX_DELAY_MS = 2_000;
 const NATIVE_HOOK_RELAY_BRIDGE_STALE_REGISTRATION_ERROR =
   "native hook relay bridge stale registration";
 const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, "g");
@@ -248,6 +268,7 @@ type NativeHookRelayPermissionApprovalResult =
 type NativeHookRelaySharedState = {
   relays: Map<string, ActiveNativeHookRelayRegistration>;
   relayBridges: Map<string, NativeHookRelayBridgeRegistration>;
+  relaySupervisors?: Map<string, NativeHookRelaySupervisor>;
   invocations: NativeHookRelayInvocation[];
   pendingPermissionApprovals: Map<string, Promise<NativeHookRelayPermissionApprovalResult>>;
   pendingPreToolUseApprovals: Map<string, NativeHookRelayPreToolUseApproval>;
@@ -262,6 +283,12 @@ type ActiveNativeHookRelayRegistration = NativeHookRelayRegistration & {
 
 type ActiveNativeHookRelayRegistrationHandle = NativeHookRelayRegistrationHandle & {
   generation: string;
+};
+
+type NativeHookRelaySupervisor = {
+  registration: ActiveNativeHookRelayRegistration;
+  recoveryFailures: number;
+  recoveryTimer?: ReturnType<typeof setTimeout>;
 };
 
 const NATIVE_HOOK_RELAY_STATE_SYMBOL = Symbol.for("openclaw.nativeHookRelay.state");
@@ -285,6 +312,10 @@ function getNativeHookRelaySharedState(): NativeHookRelaySharedState {
 const nativeHookRelayState = getNativeHookRelaySharedState();
 const relays = nativeHookRelayState.relays;
 const relayBridges = nativeHookRelayState.relayBridges;
+const relaySupervisors = (nativeHookRelayState.relaySupervisors ??= new Map<
+  string,
+  NativeHookRelaySupervisor
+>());
 const invocations = nativeHookRelayState.invocations;
 const pendingPermissionApprovals = nativeHookRelayState.pendingPermissionApprovals;
 const pendingPreToolUseApprovals = nativeHookRelayState.pendingPreToolUseApprovals;
@@ -458,6 +489,7 @@ export function registerNativeHookRelay(
   };
   relays.set(relayId, registration);
   registerNativeHookRelayBridge(registration);
+  startNativeHookRelaySupervisor(registration);
   const handle: ActiveNativeHookRelayRegistrationHandle = {
     ...registration,
     shouldRelayEvent: (event) => nativeHookRelayEventHasLocalWork(registration, event),
@@ -480,19 +512,19 @@ export function registerNativeHookRelay(
         nodeExecutable: params.command?.nodeExecutable,
       }),
     renew: (ttlMs) => {
-      const current = relays.get(relayId);
-      if (current !== registration) {
+      if (relaySupervisors.get(relayId)?.registration !== registration) {
         return;
       }
       const renewedExpiresAtMs = resolveNativeHookRelayExpiresAtMs(ttlMs);
       if (renewedExpiresAtMs === undefined) {
         return;
       }
-      current.expiresAtMs = renewedExpiresAtMs;
+      registration.expiresAtMs = renewedExpiresAtMs;
       handle.expiresAtMs = renewedExpiresAtMs;
+      scheduleNativeHookRelayRecovery(registration);
       const bridge = relayBridges.get(relayId);
       if (bridge && bridge.server.listening) {
-        writeNativeHookRelayBridgeRecordForRegistration(current, bridge);
+        writeNativeHookRelayBridgeRecordForRegistration(registration, bridge);
       }
     },
     unregister: () => unregisterNativeHookRelay(relayId, registration),
@@ -504,14 +536,109 @@ function unregisterNativeHookRelay(
   relayId: string,
   expectedRegistration?: ActiveNativeHookRelayRegistration,
 ): void {
-  if (expectedRegistration && relays.get(relayId) !== expectedRegistration) {
-    return;
+  const current = relays.get(relayId);
+  const supervisor = relaySupervisors.get(relayId);
+  if (expectedRegistration) {
+    if (
+      (current && current !== expectedRegistration) ||
+      (supervisor && supervisor.registration !== expectedRegistration)
+    ) {
+      return;
+    }
   }
+  stopNativeHookRelaySupervisor(relayId, expectedRegistration);
   unregisterNativeHookRelayBridge(relayId);
   relays.delete(relayId);
   removeNativeHookRelayInvocations(relayId);
   removeNativeHookRelayPreToolUseApprovals(relayId);
   removeNativeHookRelayPermissionState(relayId);
+}
+
+function startNativeHookRelaySupervisor(registration: ActiveNativeHookRelayRegistration): void {
+  relaySupervisors.set(registration.relayId, { registration, recoveryFailures: 0 });
+}
+
+function stopNativeHookRelaySupervisor(
+  relayId: string,
+  expectedRegistration?: ActiveNativeHookRelayRegistration,
+): void {
+  const supervisor = relaySupervisors.get(relayId);
+  if (!supervisor || (expectedRegistration && supervisor.registration !== expectedRegistration)) {
+    return;
+  }
+  relaySupervisors.delete(relayId);
+  if (supervisor.recoveryTimer) {
+    clearTimeout(supervisor.recoveryTimer);
+  }
+}
+
+function scheduleNativeHookRelayRecovery(
+  registration: ActiveNativeHookRelayRegistration,
+  options?: { afterFailure?: boolean },
+): void {
+  const supervisor = relaySupervisors.get(registration.relayId);
+  if (supervisor?.registration !== registration || supervisor.recoveryTimer) {
+    return;
+  }
+  if (options?.afterFailure) {
+    supervisor.recoveryFailures += 1;
+  }
+  const delayMs = Math.min(
+    NATIVE_HOOK_RELAY_RECOVERY_MAX_DELAY_MS,
+    NATIVE_HOOK_RELAY_RECOVERY_DELAY_MS * 2 ** Math.min(supervisor.recoveryFailures, 5),
+  );
+  const recoveryTimer = setTimeout(() => {
+    const currentSupervisor = relaySupervisors.get(registration.relayId);
+    if (
+      currentSupervisor?.registration !== registration ||
+      currentSupervisor.recoveryTimer !== recoveryTimer
+    ) {
+      return;
+    }
+    currentSupervisor.recoveryTimer = undefined;
+    try {
+      recoverNativeHookRelayRegistration(registration);
+    } catch (error) {
+      log.warn("native hook relay supervisor recovery failed", {
+        error,
+        relayId: registration.relayId,
+        runId: registration.runId,
+      });
+      scheduleNativeHookRelayRecovery(registration, { afterFailure: true });
+    }
+  }, delayMs);
+  supervisor.recoveryTimer = recoveryTimer;
+  recoveryTimer.unref();
+}
+
+function recoverNativeHookRelayRegistration(registration: ActiveNativeHookRelayRegistration): void {
+  const supervisor = relaySupervisors.get(registration.relayId);
+  if (supervisor?.registration !== registration) {
+    return;
+  }
+  if (registration.signal?.aborted || Date.now() > registration.expiresAtMs) {
+    unregisterNativeHookRelay(registration.relayId, registration);
+    return;
+  }
+  const current = relays.get(registration.relayId);
+  if (current && current !== registration) {
+    stopNativeHookRelaySupervisor(registration.relayId, registration);
+    return;
+  }
+  if (!current) {
+    relays.set(registration.relayId, registration);
+    log.warn("native hook relay supervisor restored registration", {
+      relayId: registration.relayId,
+      runId: registration.runId,
+    });
+  }
+  if (!relayBridges.has(registration.relayId)) {
+    registerNativeHookRelayBridge(registration);
+    log.warn("native hook relay supervisor restarted bridge", {
+      relayId: registration.relayId,
+      runId: registration.runId,
+    });
+  }
 }
 
 function normalizeRelayId(value: string | undefined): string | undefined {
@@ -580,7 +707,7 @@ export function buildNativeHookRelayCommand(params: {
       ? ["openclaw"]
       : [params.nodeExecutable ?? process.execPath, executable];
   const nicePrefix = resolveNativeHookRelayNicePrefix(params.nice);
-  return shellQuoteArgs([
+  const command = shellQuoteArgs([
     ...nicePrefix,
     ...argv,
     "hooks",
@@ -598,6 +725,9 @@ export function buildNativeHookRelayCommand(params: {
     "--timeout",
     String(timeoutMs),
   ]);
+  // Codex kills the shell process when a hook times out. Replace that shell so
+  // the timeout targets this relay instead of leaving its Node child behind.
+  return process.platform === "win32" ? command : `exec ${command}`;
 }
 
 function nativePreToolUseMayRunLoopDetection(registration: NativeHookRelayRegistration): boolean {
@@ -638,6 +768,18 @@ export async function invokeNativeHookRelay(
   const registration = relays.get(relayId);
   if (!registration) {
     pruneExpiredNativeHookRelays();
+    const supervisor = relaySupervisors.get(relayId);
+    if (
+      supervisor &&
+      !supervisor.registration.signal?.aborted &&
+      Date.now() <= supervisor.registration.expiresAtMs
+    ) {
+      scheduleNativeHookRelayRecovery(supervisor.registration);
+      throw new NativeHookRelayRecoveringError();
+    }
+    if (supervisor) {
+      unregisterNativeHookRelay(relayId, supervisor.registration);
+    }
     throw new Error("native hook relay not found");
   }
   if (Date.now() > registration.expiresAtMs) {
@@ -835,7 +977,7 @@ export async function invokeNativeHookRelayBridge(
       if (Date.now() > record.expiresAtMs) {
         throw new Error("native hook relay bridge expired");
       }
-      return await invokeNativeHookRelayBridgeRecord({
+      return await postNativeHookRelayBridgeRecord({
         record,
         timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)),
         payload: {
@@ -1069,15 +1211,45 @@ function registerNativeHookRelayBridge(registration: ActiveNativeHookRelayRegist
   });
   relayBridges.set(registration.relayId, bridge);
   server.on("error", (error) => {
-    log.debug("native hook relay bridge server error", { error, relayId: registration.relayId });
+    log.warn("native hook relay bridge server error", { error, relayId: registration.relayId });
+    detachUnexpectedNativeHookRelayBridge(bridge);
+  });
+  server.on("close", () => {
+    detachUnexpectedNativeHookRelayBridge(bridge);
   });
   server.listen(0, "127.0.0.1", () => {
     if (relayBridges.get(registration.relayId) !== bridge) {
       return;
     }
     writeNativeHookRelayBridgeRecordForRegistration(registration, bridge);
+    const supervisor = relaySupervisors.get(registration.relayId);
+    if (supervisor?.registration === registration) {
+      supervisor.recoveryFailures = 0;
+    }
   });
   server.unref();
+}
+
+function detachUnexpectedNativeHookRelayBridge(bridge: NativeHookRelayBridgeRegistration): void {
+  if (relayBridges.get(bridge.relayId) !== bridge) {
+    return;
+  }
+  relayBridges.delete(bridge.relayId);
+  removeNativeHookRelayBridgeRecord(bridge);
+  if (bridge.server.listening) {
+    bridge.server.close();
+  }
+  const supervisor = relaySupervisors.get(bridge.relayId);
+  if (supervisor) {
+    scheduleNativeHookRelayRecovery(supervisor.registration, { afterFailure: true });
+  }
+}
+
+function removeNativeHookRelayBridgeRecord(bridge: NativeHookRelayBridgeRegistration): void {
+  const record = readNativeHookRelayBridgeRecordIfExists(bridge.relayId);
+  if (record?.token === bridge.token) {
+    rmSync(bridge.registryPath, { force: true });
+  }
 }
 
 function writeNativeHookRelayBridgeRecordForRegistration(
@@ -1128,7 +1300,7 @@ function unregisterNativeHookRelayBridge(
       timeout.unref();
       return;
     }
-    rmSync(bridge.registryPath, { force: true });
+    removeNativeHookRelayBridgeRecord(bridge);
   }
 }
 
@@ -1184,9 +1356,21 @@ async function handleNativeHookRelayBridgeRequest(
 }
 
 function isCurrentNativeHookRelayBridgeRequest(auth: NativeHookRelayBridgeRequestAuth): boolean {
-  return (
-    relays.get(auth.relayId) === auth.registration && relayBridges.get(auth.relayId) === auth.bridge
-  );
+  if (relayBridges.get(auth.relayId) !== auth.bridge) {
+    return false;
+  }
+  const current = relays.get(auth.relayId);
+  if (current === auth.registration) {
+    return true;
+  }
+  if (
+    !current &&
+    relaySupervisors.get(auth.relayId)?.registration === auth.registration &&
+    !auth.registration.signal?.aborted
+  ) {
+    scheduleNativeHookRelayRecovery(auth.registration);
+  }
+  return false;
 }
 
 async function readNativeHookRelayBridgeBody(req: NodeJS.ReadableStream): Promise<string> {
@@ -1273,32 +1457,6 @@ function isNativeHookRelayBridgeRecord(
     value.token.length > 0 &&
     typeof value.expiresAtMs === "number"
   );
-}
-
-async function invokeNativeHookRelayBridgeRecord(params: {
-  record: NativeHookRelayBridgeRecord;
-  timeoutMs: number;
-  payload: InvokeNativeHookRelayParams;
-}): Promise<NativeHookRelayProcessResponse> {
-  const startedAt = Date.now();
-  let lastError: unknown;
-  while (Date.now() - startedAt < params.timeoutMs) {
-    try {
-      return await postNativeHookRelayBridgeRecord({
-        ...params,
-        timeoutMs: Math.max(1, params.timeoutMs - (Date.now() - startedAt)),
-      });
-    } catch (error) {
-      lastError = error;
-      if (!isRetryableNativeHookRelayBridgeError(error)) {
-        break;
-      }
-      await delay(
-        Math.min(NATIVE_HOOK_BRIDGE_RETRY_INTERVAL_MS, params.timeoutMs - (Date.now() - startedAt)),
-      );
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 function postNativeHookRelayBridgeRecord(params: {
@@ -2411,10 +2569,22 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 
 export const testing = {
   clearNativeHookRelaysForTests(): void {
-    for (const relayId of relayBridges.keys()) {
-      unregisterNativeHookRelayBridge(relayId);
+    const relayIds = new Set([
+      ...relays.keys(),
+      ...relayBridges.keys(),
+      ...relaySupervisors.keys(),
+    ]);
+    for (const relayId of relayIds) {
+      unregisterNativeHookRelay(relayId);
     }
     relays.clear();
+    relayBridges.clear();
+    for (const supervisor of relaySupervisors.values()) {
+      if (supervisor.recoveryTimer) {
+        clearTimeout(supervisor.recoveryTimer);
+      }
+    }
+    relaySupervisors.clear();
     invocations.length = 0;
     pendingPermissionApprovals.clear();
     for (const pendingApproval of pendingPreToolUseApprovals.values()) {
@@ -2431,6 +2601,24 @@ export const testing = {
   },
   getNativeHookRelayRegistrationForTests(relayId: string): NativeHookRelayRegistration | undefined {
     return relays.get(relayId);
+  },
+  dropNativeHookRelayRegistrationForTests(relayId: string): boolean {
+    const registration = relays.get(relayId);
+    if (!registration || relaySupervisors.get(relayId)?.registration !== registration) {
+      return false;
+    }
+    relays.delete(relayId);
+    return true;
+  },
+  async closeNativeHookRelayBridgeForTests(relayId: string): Promise<boolean> {
+    const bridge = relayBridges.get(relayId);
+    if (!bridge) {
+      return false;
+    }
+    await new Promise<void>((resolve, reject) => {
+      bridge.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    return true;
   },
   getNativeHookRelayBridgeDirForTests(): string {
     return nativeHookRelayBridgeDir();

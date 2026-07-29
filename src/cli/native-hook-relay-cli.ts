@@ -1,12 +1,13 @@
 // CLI adapter for invoking native provider hooks through direct relay or gateway fallback.
 import {
   invokeNativeHookRelayBridge,
-  isNativeHookRelayBridgeStaleRegistrationError,
   renderNativeHookRelayUnavailableResponse,
   type NativeHookRelayProcessResponse,
 } from "../agents/harness/native-hook-relay.js";
 import { callGateway } from "../gateway/call.js";
+import { GatewayClientRequestError } from "../gateway/client.js";
 import { ADMIN_SCOPE } from "../gateway/method-scopes.js";
+import { sleepWithAbort } from "../infra/backoff.js";
 import { setSafeTimeout } from "../utils/timer-delay.js";
 import { parseTimeoutMsWithFallback } from "./parse-timeout.js";
 
@@ -115,25 +116,22 @@ export async function runNativeHookRelayCli(
           error,
         });
       }
-      if (isNativeHookRelayBridgeStaleRegistrationError(error)) {
-        writeText(stderr, formatRelayCliError("native hook relay unavailable", error));
-        return writeNativeHookRelayUnavailableResponse({ stdout, stderr, opts, provider, event });
-      }
       // Fall through to the gateway path for embedded/local gateway cases and
-      // older registrations that predate the direct relay bridge.
+      // older registrations that predate the direct relay bridge. Gateway
+      // generation validation preserves fail-closed stale-relay behavior while
+      // allowing a supervised registration to report a retryable recovery gap.
     }
 
     try {
-      const response = await withNativeHookRelayDeadline(
+      const response = await invokeNativeHookRelayGatewayWithRetry({
+        callGatewayFn,
         deadline,
-        callGatewayFn<NativeHookRelayProcessResponse>({
-          method: "nativeHook.invoke",
-          params: { provider, relayId, generation, event, rawPayload },
-          timeoutMs: remainingNativeHookRelayDeadlineMs(deadline),
-          signal: deadline.signal,
-          scopes: [ADMIN_SCOPE],
-        }),
-      );
+        provider,
+        relayId,
+        generation,
+        event,
+        rawPayload,
+      });
       writeText(stdout, response.stdout);
       writeText(stderr, response.stderr);
       return response.exitCode;
@@ -154,6 +152,61 @@ export async function runNativeHookRelayCli(
   } finally {
     deadline.dispose();
   }
+}
+
+async function invokeNativeHookRelayGatewayWithRetry(params: {
+  callGatewayFn: typeof callGateway;
+  deadline: NativeHookRelayDeadline;
+  provider: string;
+  relayId: string;
+  generation: string | undefined;
+  event: string;
+  rawPayload: unknown;
+}): Promise<NativeHookRelayProcessResponse> {
+  while (true) {
+    try {
+      return await withNativeHookRelayDeadline(
+        params.deadline,
+        params.callGatewayFn<NativeHookRelayProcessResponse>({
+          method: "nativeHook.invoke",
+          params: {
+            provider: params.provider,
+            relayId: params.relayId,
+            generation: params.generation,
+            event: params.event,
+            rawPayload: params.rawPayload,
+          },
+          timeoutMs: remainingNativeHookRelayDeadlineMs(params.deadline),
+          signal: params.deadline.signal,
+          scopes: [ADMIN_SCOPE],
+        }),
+      );
+    } catch (error) {
+      if (isNativeHookRelayDeadlineError(error)) {
+        throw error;
+      }
+      const retryAfterMs = nativeHookRelayGatewayRetryAfterMs(error);
+      if (retryAfterMs === undefined) {
+        throw error;
+      }
+      const delayMs = Math.min(retryAfterMs, remainingNativeHookRelayDeadlineMs(params.deadline));
+      await withNativeHookRelayDeadline(
+        params.deadline,
+        sleepWithAbort(delayMs, params.deadline.signal),
+      );
+    }
+  }
+}
+
+function nativeHookRelayGatewayRetryAfterMs(error: unknown): number | undefined {
+  if (
+    !(error instanceof GatewayClientRequestError) ||
+    error.gatewayCode !== "UNAVAILABLE" ||
+    !error.retryable
+  ) {
+    return undefined;
+  }
+  return Math.max(1, error.retryAfterMs ?? 100);
 }
 
 function readRequiredOption(value: string | undefined, name: string): string {
