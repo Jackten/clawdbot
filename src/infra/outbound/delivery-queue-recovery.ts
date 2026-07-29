@@ -29,7 +29,6 @@ import {
   runOutboundDeliveryCommitHooks,
 } from "./delivery-commit-hooks.js";
 import {
-  ackDelivery,
   completeDelivery,
   failDelivery,
   failDeliveryAfterPlatformSend,
