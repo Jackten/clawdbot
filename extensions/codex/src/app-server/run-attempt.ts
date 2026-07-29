@@ -284,6 +284,74 @@ import { resolveCodexWebSearchPlan } from "./web-search.js";
 
 const CODEX_NATIVE_HOOK_RELAY_RENEW_INTERVAL_MS = 60_000;
 const CODEX_APP_SERVER_PROJECTED_CHARS_PER_TOKEN = 4;
+const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
+
+type NativeDescendantSettlementMonitor = {
+  deferUntilParentSettles: (
+    parentThreadId: string,
+    callback: () => Promise<void> | void,
+  ) => boolean;
+};
+
+function deferCodexNativeDescendantCleanup(params: {
+  monitor: NativeDescendantSettlementMonitor | undefined;
+  parentThreadId: string;
+  relay: NativeHookRelayRegistrationHandle | undefined;
+  cleanupParent: () => Promise<void>;
+  releaseRelayAfterSettlement: () => void;
+}): boolean {
+  let settlementStarted = false;
+  let relayReleased = false;
+  let relayDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearRelayDeadlineTimer = () => {
+    if (!relayDeadlineTimer) {
+      return;
+    }
+    clearTimeout(relayDeadlineTimer);
+    relayDeadlineTimer = undefined;
+  };
+  const releaseRelayAtDeadline = () => {
+    if (relayReleased || !params.relay) {
+      return;
+    }
+    const remainingMs = params.relay.expiresAtMs - Date.now();
+    if (remainingMs > 0) {
+      relayDeadlineTimer = setTimeout(
+        releaseRelayAtDeadline,
+        Math.min(remainingMs, MAX_NODE_TIMEOUT_MS),
+      );
+      relayDeadlineTimer.unref?.();
+      return;
+    }
+    relayReleased = true;
+    params.relay.unregister();
+  };
+  const settle = async () => {
+    if (settlementStarted) {
+      return;
+    }
+    settlementStarted = true;
+    clearRelayDeadlineTimer();
+    try {
+      await params.cleanupParent();
+    } finally {
+      if (!relayReleased) {
+        relayReleased = true;
+        params.releaseRelayAfterSettlement();
+      }
+    }
+  };
+
+  const deferred = params.monitor?.deferUntilParentSettles(params.parentThreadId, settle) ?? false;
+  if (!deferred) {
+    return false;
+  }
+  if (params.relay) {
+    releaseRelayAtDeadline();
+  }
+  return true;
+}
 
 function shouldKeepCodexSharedAbortOpen(params: {
   trigger: EmbeddedRunAttemptParams["trigger"];
@@ -3614,18 +3682,40 @@ export async function runCodexAppServerAttempt(
     if (!timedOut && !runAbortController.signal.aborted) {
       await steeringQueueRef.current?.flushPending();
     }
+    const releaseNativeHookRelayAfterSettlement = () => {
+      if (!nativeHookRelay) {
+        return;
+      }
+      if (shouldDelayNativeHookRelayUnregister) {
+        // Codex hook subprocesses can outlive a completed app-server turn by a
+        // few seconds. Keep the relay available briefly so late
+        // nativeHook.invoke RPCs can still reach before_tool_call enforcement.
+        scheduleCodexNativeHookRelayUnregister({
+          relay: nativeHookRelay,
+          hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
+        });
+      } else {
+        nativeHookRelay.unregister();
+      }
+    };
     const yieldedOneShotCleanupDeferred =
       !timedOut &&
       params.cleanupBundleMcpOnRunEnd === true &&
       yieldDetected &&
-      nativeSubagentMonitorRef.current?.deferUntilParentSettles(thread.threadId, async () => {
-        // Keep the parent subscription alive until native child delivery;
-        // unsubscribing first drops the completion signal that settles cleanup.
-        await unsubscribeCodexThreadBestEffort(client, {
-          threadId: thread.threadId,
-          timeoutMs: CODEX_APP_SERVER_UNSUBSCRIBE_TIMEOUT_MS,
-        });
-        await releaseSharedClientLeaseAndRetireOneShotClient();
+      deferCodexNativeDescendantCleanup({
+        monitor: nativeSubagentMonitorRef.current,
+        parentThreadId: thread.threadId,
+        relay: nativeHookRelay,
+        cleanupParent: async () => {
+          // Keep the parent subscription and native hook relay alive until
+          // native child delivery; dropping either strands the detached child.
+          await unsubscribeCodexThreadBestEffort(client, {
+            threadId: thread.threadId,
+            timeoutMs: CODEX_APP_SERVER_UNSUBSCRIBE_TIMEOUT_MS,
+          });
+          await releaseSharedClientLeaseAndRetireOneShotClient();
+        },
+        releaseRelayAfterSettlement: releaseNativeHookRelayAfterSettlement,
       });
     if (!timedOut && !yieldedOneShotCleanupDeferred) {
       await unsubscribeCodexThreadBestEffort(client, {
@@ -3639,18 +3729,8 @@ export async function runCodexAppServerAttempt(
     if (!yieldedOneShotCleanupDeferred) {
       await releaseSharedClientLeaseAndRetireOneShotClient();
     }
-    if (nativeHookRelay) {
-      if (shouldDelayNativeHookRelayUnregister) {
-        // Codex hook subprocesses can outlive a completed app-server turn by a
-        // few seconds. Keep the relay available briefly so late
-        // nativeHook.invoke RPCs can still reach before_tool_call enforcement.
-        scheduleCodexNativeHookRelayUnregister({
-          relay: nativeHookRelay,
-          hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
-        });
-      } else {
-        nativeHookRelay.unregister();
-      }
+    if (!yieldedOneShotCleanupDeferred) {
+      releaseNativeHookRelayAfterSettlement();
     }
     await releaseSandboxExecEnvironment();
     runAbortController.signal.removeEventListener("abort", abortListener);
@@ -3926,5 +4006,6 @@ export const testing = {
   flushPendingCodexNativeHookRelayUnregistersForTests,
   clearPendingCodexNativeHookRelayUnregistersForTests,
   resolveCodexNativeHookRelayUnregisterGraceMs,
+  deferCodexNativeDescendantCleanup,
 } as const;
 export { testing as __testing };

@@ -702,6 +702,88 @@ describe("runCodexAppServerAttempt native hook relay", () => {
     expect(testing.resolveCodexNativeHookRelayUnregisterGraceMs(60)).toBe(65_000);
   });
 
+  it("keeps parent cleanup and the native hook relay until descendants settle", async () => {
+    vi.useFakeTimers();
+    try {
+      let settleParent: (() => Promise<void> | void) | undefined;
+      const unregister = vi.fn();
+      const cleanupParent = vi.fn(async () => undefined);
+      const releaseRelayAfterSettlement = vi.fn();
+      const relay = {
+        expiresAtMs: Date.now() + 60_000,
+        unregister,
+      } as unknown as NativeHookRelayRegistrationHandle;
+
+      const deferred = testing.deferCodexNativeDescendantCleanup({
+        monitor: {
+          deferUntilParentSettles: (_parentThreadId, callback) => {
+            settleParent = callback;
+            return true;
+          },
+        },
+        parentThreadId: "parent-thread",
+        relay,
+        cleanupParent,
+        releaseRelayAfterSettlement,
+      });
+
+      expect(deferred).toBe(true);
+      expect(cleanupParent).not.toHaveBeenCalled();
+      expect(releaseRelayAfterSettlement).not.toHaveBeenCalled();
+      expect(unregister).not.toHaveBeenCalled();
+
+      await settleParent?.();
+
+      expect(cleanupParent).toHaveBeenCalledOnce();
+      expect(releaseRelayAfterSettlement).toHaveBeenCalledOnce();
+      expect(unregister).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(unregister).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hard-caps a deferred native hook relay at its existing expiry", async () => {
+    vi.useFakeTimers();
+    try {
+      let settleParent: (() => Promise<void> | void) | undefined;
+      const unregister = vi.fn();
+      const cleanupParent = vi.fn(async () => undefined);
+      const releaseRelayAfterSettlement = vi.fn();
+      const relay = {
+        expiresAtMs: Date.now() + 1_000,
+        unregister,
+      } as unknown as NativeHookRelayRegistrationHandle;
+
+      const deferred = testing.deferCodexNativeDescendantCleanup({
+        monitor: {
+          deferUntilParentSettles: (_parentThreadId, callback) => {
+            settleParent = callback;
+            return true;
+          },
+        },
+        parentThreadId: "parent-thread",
+        relay,
+        cleanupParent,
+        releaseRelayAfterSettlement,
+      });
+
+      expect(deferred).toBe(true);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(unregister).toHaveBeenCalledOnce();
+      expect(cleanupParent).not.toHaveBeenCalled();
+
+      await settleParent?.();
+
+      expect(cleanupParent).toHaveBeenCalledOnce();
+      expect(releaseRelayAfterSettlement).not.toHaveBeenCalled();
+      expect(unregister).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("sends clearing Codex native hook config when the relay is disabled", async () => {
     const sessionFile = path.join(tempDir, "session.jsonl");
     const workspaceDir = path.join(tempDir, "workspace");
