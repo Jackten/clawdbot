@@ -50,6 +50,7 @@ export type RecoverySummary = {
   failed: number;
   skippedMaxRetries: number;
   deferredBackoff: number;
+  deferredReadiness?: number;
 };
 
 export type DeliverFn = (
@@ -819,6 +820,8 @@ export async function recoverPendingDeliveries(opts: {
   log: RecoveryLogger;
   cfg: OpenClawConfig;
   stateDir?: string;
+  /** Return false when the owning channel/account is not ready for replay yet. */
+  canAttempt?: (entry: QueuedDelivery) => boolean;
   /** Maximum wall-clock time for recovery in ms. Remaining entries are deferred to next startup. Default: 60 000. */
   maxRecoveryMs?: number;
 }): Promise<RecoverySummary> {
@@ -851,6 +854,14 @@ export async function recoverPendingDeliveries(opts: {
       const currentEntry = await loadPendingDelivery(entry.id, opts.stateDir);
       if (!currentEntry) {
         opts.log.info(`Recovery skipped for delivery ${entry.id}: already gone`);
+        continue;
+      }
+
+      if (opts.canAttempt && !opts.canAttempt(currentEntry)) {
+        summary.deferredReadiness = (summary.deferredReadiness ?? 0) + 1;
+        opts.log.info(
+          `Delivery ${currentEntry.id} deferred until ${currentEntry.channel} is ready`,
+        );
         continue;
       }
 
@@ -908,7 +919,7 @@ export async function recoverPendingDeliveries(opts: {
   }
 
   opts.log.info(
-    `Delivery recovery complete: ${summary.recovered} recovered, ${summary.failed} failed, ${summary.skippedMaxRetries} skipped (max retries), ${summary.deferredBackoff} deferred (backoff)`,
+    `Delivery recovery complete: ${summary.recovered} recovered, ${summary.failed} failed, ${summary.skippedMaxRetries} skipped (max retries), ${summary.deferredBackoff} deferred (backoff), ${summary.deferredReadiness ?? 0} deferred (readiness)`,
   );
   return summary;
 }

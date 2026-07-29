@@ -120,6 +120,33 @@ describe("delivery-queue recovery", () => {
     expect(await loadPendingDeliveries(tmpDir())).toHaveLength(0);
   });
 
+  it("defers startup recovery until the owning channel account is ready", async () => {
+    const id = await enqueueDelivery(
+      {
+        channel: "whatsapp",
+        accountId: "default",
+        to: "+1",
+        payloads: [{ text: "ready-bound delivery" }],
+      },
+      tmpDir(),
+    );
+    const deliver = vi.fn().mockResolvedValue([]);
+
+    const result = await recoverPendingDeliveries({
+      deliver: asDeliverFn(deliver),
+      log: createRecoveryLog(),
+      cfg: baseCfg,
+      stateDir: tmpDir(),
+      canAttempt: (entry) => entry.channel !== "whatsapp",
+    });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ recovered: 0, failed: 0, deferredReadiness: 1 });
+    expect(await loadPendingDeliveries(tmpDir())).toEqual([
+      expect.objectContaining({ id, retryCount: 0 }),
+    ]);
+  });
+
   it("paces startup replay instead of draining eligible entries back-to-back", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-04-23T00:00:00.000Z");

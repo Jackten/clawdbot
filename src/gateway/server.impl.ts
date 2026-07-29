@@ -1626,6 +1626,8 @@ export async function startGatewayServer(
           startCron: false,
           logCron,
           log,
+          getChannelRuntimeSnapshot: getRuntimeSnapshot,
+          isClosing: () => closePreludeStarted,
           pluginLookUpTable,
         });
         runtimeState.heartbeatRunner = activated.heartbeatRunner;

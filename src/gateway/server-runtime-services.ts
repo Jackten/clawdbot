@@ -4,8 +4,10 @@ import { getRuntimeConfig } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isVitestRuntimeEnv } from "../infra/env.js";
 import { startHeartbeatRunner, type HeartbeatRunner } from "../infra/heartbeat-runner.js";
+import type { QueuedDelivery } from "../infra/outbound/delivery-queue-storage.js";
 import type { PluginMetadataRegistryView } from "../plugins/plugin-metadata-snapshot.types.js";
 import { isGatewayModelPricingEnabled } from "./model-pricing-config.js";
+import type { ChannelRuntimeSnapshot } from "./server-channel-runtime.types.js";
 import type { startGatewayMaintenanceTimers } from "./server-maintenance.js";
 import {
   createNoopHeartbeatRunner,
@@ -140,6 +142,8 @@ export function scheduleGatewayPostReadyMaintenance(params: {
 function recoverPendingOutboundDeliveries(params: {
   cfg: OpenClawConfig;
   log: GatewayRuntimeServiceLogger;
+  getChannelRuntimeSnapshot: () => ChannelRuntimeSnapshot;
+  isClosing: () => boolean;
 }): void {
   // Recovery is best-effort background work; startup must continue even if outbound modules fail
   // to import or queued delivery replay fails.
@@ -147,11 +151,41 @@ function recoverPendingOutboundDeliveries(params: {
     const { recoverPendingDeliveries } = await import("../infra/outbound/delivery-queue.js");
     const { deliverOutboundPayloadsInternal } = await import("../infra/outbound/deliver.js");
     const logRecovery = params.log.child("delivery-recovery");
-    await recoverPendingDeliveries({
-      deliver: deliverOutboundPayloadsInternal,
-      log: logRecovery,
-      cfg: params.cfg,
-    });
+    const canAttempt = (entry: QueuedDelivery) => {
+      let snapshot: ChannelRuntimeSnapshot;
+      try {
+        snapshot = params.getChannelRuntimeSnapshot();
+      } catch {
+        return false;
+      }
+      const accounts = snapshot.channelAccounts[entry.channel];
+      const account = entry.accountId
+        ? accounts?.[entry.accountId]
+        : snapshot.channels[entry.channel];
+      if (!account) {
+        return true;
+      }
+      return typeof account.connected === "boolean" ? account.connected : account.running === true;
+    };
+    const maxReadinessAttempts = 60;
+    for (let attempt = 0; attempt < maxReadinessAttempts && !params.isClosing(); attempt += 1) {
+      const summary = await recoverPendingDeliveries({
+        deliver: deliverOutboundPayloadsInternal,
+        log: logRecovery,
+        cfg: params.cfg,
+        canAttempt,
+      });
+      if (!summary.deferredReadiness) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 1_000);
+        timer.unref?.();
+      });
+    }
+    if (!params.isClosing()) {
+      logRecovery.warn("Delivery recovery readiness retry budget expired");
+    }
   })().catch((err: unknown) => params.log.error(`Delivery recovery failed: ${String(err)}`));
 }
 
@@ -224,6 +258,8 @@ export function activateGatewayScheduledServices(params: {
   startCron?: boolean;
   logCron: { error: (message: string) => void };
   log: GatewayRuntimeServiceLogger;
+  getChannelRuntimeSnapshot: () => ChannelRuntimeSnapshot;
+  isClosing: () => boolean;
   pluginLookUpTable?: PluginMetadataRegistryView;
 }): { heartbeatRunner: HeartbeatRunner; stopModelPricingRefresh: () => void } {
   if (params.minimalTestGateway) {
@@ -244,6 +280,8 @@ export function activateGatewayScheduledServices(params: {
   recoverPendingOutboundDeliveries({
     cfg: params.cfgAtStart,
     log: params.log,
+    getChannelRuntimeSnapshot: params.getChannelRuntimeSnapshot,
+    isClosing: params.isClosing,
   });
   recoverPendingSessionDeliveries({
     deps: params.deps,

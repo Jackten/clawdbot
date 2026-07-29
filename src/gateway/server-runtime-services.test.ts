@@ -17,7 +17,7 @@ const hoisted = vi.hoisted(() => {
     startGatewayModelPricingRefresh: vi.fn(() => stopModelPricingRefresh),
     loadModelPricingCacheModule: vi.fn(),
     isVitestRuntimeEnv: vi.fn(() => false),
-    recoverPendingDeliveries: vi.fn(async () => undefined),
+    recoverPendingDeliveries: vi.fn(async () => ({})),
     recoverPendingRestartContinuationDeliveries: vi.fn(async () => undefined),
     deliverOutboundPayloads: vi.fn(),
   };
@@ -75,7 +75,7 @@ describe("server-runtime-services", () => {
     hoisted.stopModelPricingRefresh.mockClear();
     hoisted.loadModelPricingCacheModule.mockClear();
     hoisted.isVitestRuntimeEnv.mockReset().mockReturnValue(false);
-    hoisted.recoverPendingDeliveries.mockClear();
+    hoisted.recoverPendingDeliveries.mockReset().mockResolvedValue({});
     hoisted.recoverPendingRestartContinuationDeliveries.mockClear();
     hoisted.deliverOutboundPayloads.mockClear();
   });
@@ -93,6 +93,8 @@ describe("server-runtime-services", () => {
       cron: { start: vi.fn(async () => undefined) },
       logCron: { error: vi.fn() },
       log: createLog(),
+      getChannelRuntimeSnapshot: () => ({ channels: {}, channelAccounts: {} }),
+      isClosing: () => false,
     });
 
     await vi.dynamicImportSettled();
@@ -192,6 +194,7 @@ describe("server-runtime-services", () => {
       deliver: hoisted.deliverOutboundPayloads,
       cfg: {},
       log: deliveryLog,
+      canAttempt: expect.any(Function),
     });
     expect(hoisted.recoverPendingRestartContinuationDeliveries).toHaveBeenCalledWith({
       deps: {},
@@ -214,6 +217,8 @@ describe("server-runtime-services", () => {
       startCron: false,
       logCron: { error: vi.fn() },
       log,
+      getChannelRuntimeSnapshot: () => ({ channels: {}, channelAccounts: {} }),
+      isClosing: () => false,
     });
 
     expect(hoisted.startHeartbeatRunner).toHaveBeenCalledTimes(1);
@@ -221,6 +226,56 @@ describe("server-runtime-services", () => {
     await vi.advanceTimersByTimeAsync(1_250);
     await vi.dynamicImportSettled();
     expect(hoisted.recoverPendingDeliveries).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds startup delivery replay to live channel-account readiness", async () => {
+    vi.useFakeTimers();
+    hoisted.recoverPendingDeliveries
+      .mockResolvedValueOnce({ deferredReadiness: 1 })
+      .mockResolvedValueOnce({});
+    let connected = false;
+    activateScheduledServicesForTest({
+      getChannelRuntimeSnapshot: () => ({
+        channels: {
+          whatsapp: {
+            accountId: "default",
+            running: true,
+            restartPending: false,
+            connected,
+          },
+        },
+        channelAccounts: {
+          whatsapp: {
+            default: {
+              accountId: "default",
+              running: true,
+              restartPending: false,
+              connected,
+            },
+          },
+        },
+      }),
+    });
+    await vi.dynamicImportSettled();
+
+    const recoveryCalls = hoisted.recoverPendingDeliveries.mock.calls as unknown as Array<
+      [{ canAttempt?: (entry: { channel: string; accountId?: string }) => boolean }]
+    >;
+    const recoveryOptions = recoveryCalls[0]?.[0] as
+      | { canAttempt?: (entry: { channel: string; accountId?: string }) => boolean }
+      | undefined;
+    expect(recoveryOptions?.canAttempt?.({ channel: "whatsapp", accountId: "default" })).toBe(
+      false,
+    );
+
+    connected = true;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.dynamicImportSettled();
+    expect(hoisted.recoverPendingDeliveries).toHaveBeenCalledTimes(2);
+    const retriedOptions = recoveryCalls[1]?.[0] as
+      | { canAttempt?: (entry: { channel: string; accountId?: string }) => boolean }
+      | undefined;
+    expect(retriedOptions?.canAttempt?.({ channel: "whatsapp", accountId: "default" })).toBe(true);
   });
 
   it("starts cron and records memory when post-ready maintenance fails", async () => {
@@ -328,6 +383,8 @@ describe("server-runtime-services", () => {
       cron,
       logCron: { error: vi.fn() },
       log: createLog(),
+      getChannelRuntimeSnapshot: () => ({ channels: {}, channelAccounts: {} }),
+      isClosing: () => false,
     });
 
     expect(hoisted.startHeartbeatRunner).not.toHaveBeenCalled();
@@ -367,6 +424,8 @@ function activateScheduledServicesForTest(
     deps: {} as never,
     sessionDeliveryRecoveryMaxEnqueuedAt: 123,
     logCron: { error: vi.fn() },
+    getChannelRuntimeSnapshot: () => ({ channels: {}, channelAccounts: {} }),
+    isClosing: () => false,
     ...overrides,
     cron,
     log,
