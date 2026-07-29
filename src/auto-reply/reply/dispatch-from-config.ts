@@ -1124,6 +1124,9 @@ type ReplyHotPathTimingSummary = {
 const replyHotPathTimingLog = createSubsystemLogger("auto-reply/reply-timing");
 const REPLY_HOT_PATH_TIMING_WARN_TOTAL_MS = 1_000;
 const REPLY_HOT_PATH_TIMING_WARN_STAGE_MS = 500;
+const BOUNDED_SILENCE_PROGRESS_MS = 30_000;
+const BOUNDED_SILENCE_PROGRESS_TEXT =
+  "Still working on this — I’ll send the result here when it’s ready.";
 
 function createReplyHotPathTimingTracker(options: { profilerEnabled?: boolean } = {}): {
   measure: <T>(name: string, run: () => Promise<T> | T) => Promise<T>;
@@ -2011,6 +2014,19 @@ export async function dispatchReplyFromConfig(
   });
   const routeReplyTo = replyRoute.to;
   const deliveryChannel = shouldRouteToOriginating ? routeReplyChannel : currentSurface;
+  let boundedSilenceProgressTimer: ReturnType<typeof setTimeout> | undefined;
+  let userVisibleDeliveryObserved = false;
+  const clearBoundedSilenceProgressTimer = () => {
+    if (!boundedSilenceProgressTimer) {
+      return;
+    }
+    clearTimeout(boundedSilenceProgressTimer);
+    boundedSilenceProgressTimer = undefined;
+  };
+  const markUserVisibleDeliveryObserved = () => {
+    userVisibleDeliveryObserved = true;
+    clearBoundedSilenceProgressTimer();
+  };
   const shouldPrepareRoutedReplyDelivery = shouldRouteToOriginating && Boolean(routeReplyChannel);
   const replyContextAccountId = routeReplyChannel
     ? resolveReplyDeliveryAccountId(cfg, routeReplyChannel, replyRoute.accountId)
@@ -2109,15 +2125,15 @@ export async function dispatchReplyFromConfig(
     abortSignal?: AbortSignal,
     mirror?: boolean,
     kind: ReplyDispatchKind = "tool",
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     // Keep the runtime guard explicit because this helper is called from nested
     // reply callbacks where TypeScript cannot narrow shouldRouteToOriginating.
     if (!routeReplyRuntime || !routeReplyChannel || !routeReplyTo) {
-      return;
+      return false;
     }
     const effectiveAbortSignal = abortSignal ?? getDispatchAbortSignal();
     if (effectiveAbortSignal?.aborted) {
-      return;
+      return false;
     }
     const result = await routeReplyToOriginating(payload, {
       abortSignal: effectiveAbortSignal,
@@ -2127,6 +2143,11 @@ export async function dispatchReplyFromConfig(
     if (result && !result.ok) {
       logVerbose(`dispatch-from-config: route-reply failed: ${result.error ?? "unknown error"}`);
     }
+    const delivered = result ? isRoutedReplyDelivered(result) : false;
+    if (delivered) {
+      markUserVisibleDeliveryObserved();
+    }
+    return delivered;
   };
 
   const deliverBindingPayload = async (
@@ -2699,6 +2720,17 @@ export async function dispatchReplyFromConfig(
       const reply = resolveSendableOutboundReplyParts(payload);
       return !reply.hasMedia && !hasExecApprovalPayload(payload);
     };
+    const deliverProgressPayload = async (payload: ReplyPayload): Promise<boolean> => {
+      if (shouldRouteToOriginating) {
+        return await sendPayloadAsync(payload, undefined, false);
+      }
+      markInboundDedupeReplayUnsafe();
+      const delivered = dispatcher.sendToolResult(payload);
+      if (delivered) {
+        markUserVisibleDeliveryObserved();
+      }
+      return delivered;
+    };
     // Durable inter-tool commentary lane: with verbose progress on, preamble
     // items become standalone progress messages like tool summaries. The latest
     // text per item id is buffered (snapshot producers re-emit the same item)
@@ -2712,12 +2744,7 @@ export async function dispatchReplyFromConfig(
       if (shouldSuppressLateTextOnlyToolProgress(payload)) {
         return;
       }
-      if (shouldRouteToOriginating) {
-        await sendPayloadAsync(payload, undefined, false);
-      } else {
-        markInboundDedupeReplayUnsafe();
-        dispatcher.sendToolResult(payload);
-      }
+      await deliverProgressPayload(payload);
     };
     const flushPendingCommentaryProgress = async () => {
       const pending = pendingCommentaryProgress;
@@ -3078,12 +3105,7 @@ export async function dispatchReplyFromConfig(
       const payload: ReplyPayload = {
         text: `Working: ${normalizedLabel}`,
       };
-      if (shouldRouteToOriginating) {
-        await sendPayloadAsync(payload, undefined, false);
-        return;
-      }
-      markInboundDedupeReplayUnsafe();
-      dispatcher.sendToolResult(payload);
+      await deliverProgressPayload(payload);
     };
     const sendPlanUpdate = async (payload: {
       explanation?: string;
@@ -3101,12 +3123,7 @@ export async function dispatchReplyFromConfig(
         text: formatPlanUpdateText(payload),
         isStatusNotice: true,
       };
-      if (shouldRouteToOriginating) {
-        await sendPayloadAsync(replyPayload, undefined, false);
-        return;
-      }
-      markInboundDedupeReplayUnsafe();
-      dispatcher.sendToolResult(replyPayload);
+      await deliverProgressPayload(replyPayload);
     };
     const summarizeApprovalLabel = (payload: {
       status?: string;
@@ -3377,6 +3394,42 @@ export async function dispatchReplyFromConfig(
         shouldSendVerboseProgressMessages() &&
         !shouldSuppressProgressDelivery(),
     );
+    let boundedSilenceReceiptClaimed = false;
+    const maybeDeliverBoundedSilenceReceipt = async () => {
+      boundedSilenceProgressTimer = undefined;
+      if (
+        boundedSilenceReceiptClaimed ||
+        userVisibleDeliveryObserved ||
+        finalReplyDeliveryStarted ||
+        isDispatchOperationAborted() ||
+        isInternalWebchatTurn ||
+        !deliveryChannel ||
+        ctx.InboundEventKind === "room_event" ||
+        shouldSuppressProgressDelivery()
+      ) {
+        return;
+      }
+      boundedSilenceReceiptClaimed = true;
+      await deliverProgressPayload({
+        text: BOUNDED_SILENCE_PROGRESS_TEXT,
+        isStatusNotice: true,
+      });
+    };
+    const armBoundedSilenceProgressTimer = () => {
+      if (
+        userVisibleDeliveryObserved ||
+        isInternalWebchatTurn ||
+        !deliveryChannel ||
+        ctx.InboundEventKind === "room_event" ||
+        shouldSuppressProgressDelivery()
+      ) {
+        return;
+      }
+      boundedSilenceProgressTimer = setTimeout(() => {
+        void maybeDeliverBoundedSilenceReceipt();
+      }, BOUNDED_SILENCE_PROGRESS_MS);
+      boundedSilenceProgressTimer.unref?.();
+    };
 
     const replyResolver =
       params.replyResolver ??
@@ -3386,6 +3439,7 @@ export async function dispatchReplyFromConfig(
       params.configOverride ? (applyMergePatch(cfg, params.configOverride) as OpenClawConfig) : cfg,
     );
     recordAgentDispatchStarted();
+    armBoundedSilenceProgressTimer();
     const replyResult = await runWithDispatchLifecycleAdmission(
       async () =>
         await runWithDispatchAbortSignal(
@@ -3566,12 +3620,7 @@ export async function dispatchReplyFromConfig(
                       if (deliveryPayload.isError === true) {
                         markVisibleToolErrorProgress();
                       }
-                      if (shouldRouteToOriginating) {
-                        await sendPayloadAsync(deliveryPayload, undefined, false);
-                      } else {
-                        markInboundDedupeReplayUnsafe();
-                        dispatcher.sendToolResult(deliveryPayload);
-                      }
+                      await deliverProgressPayload(deliveryPayload);
                     };
                     return run();
                   },
@@ -3796,6 +3845,7 @@ export async function dispatchReplyFromConfig(
                         markInboundDedupeReplayUnsafe();
                         const delivered = dispatcher.sendBlockReply(normalizedPayload);
                         if (delivered) {
+                          markUserVisibleDeliveryObserved();
                           hasPendingDirectBlockReplyDelivery = true;
                         }
                       }
@@ -3808,7 +3858,7 @@ export async function dispatchReplyFromConfig(
             ),
           trackDispatchLifecycleWork,
         ),
-    );
+    ).finally(clearBoundedSilenceProgressTimer);
     const sessionMetadataChanges = takeCommandSessionMetadataChanges(ctx);
     notifySessionMetadataChanges(sessionMetadataChanges);
     const finalDispatchAcquisition = await ensureDispatchReplyOperation("dispatch");

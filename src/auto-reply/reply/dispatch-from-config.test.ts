@@ -3808,6 +3808,156 @@ describe("dispatchReplyFromConfig", () => {
     expect(dispatcher.sendFinalReply).toHaveBeenCalledTimes(1);
   });
 
+  it("emits one generic receipt after a bounded interval with no visible progress", async () => {
+    setNoAbort();
+    sessionStoreMocks.currentEntry = {
+      verboseLevel: "on",
+    };
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+      ChatType: "group",
+      From: "whatsapp:group:123@g.us",
+      SessionKey: "agent:main:whatsapp:group:123@g.us",
+    });
+    let markReplyStarted: (() => void) | undefined;
+    const replyStarted = new Promise<void>((resolve) => {
+      markReplyStarted = resolve;
+    });
+    let finishReply: ((payload: ReplyPayload) => void) | undefined;
+    const pendingReply = new Promise<ReplyPayload>((resolve) => {
+      finishReply = resolve;
+    });
+    const replyResolver = async () => {
+      markReplyStarted?.();
+      return await pendingReply;
+    };
+
+    vi.useFakeTimers();
+    try {
+      const dispatch = dispatchReplyFromConfig({
+        ctx,
+        cfg: automaticGroupReplyConfig,
+        dispatcher,
+        replyResolver,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await replyStarted;
+
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(dispatcher.sendToolResult).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(dispatcher.sendToolResult).toHaveBeenCalledOnce();
+      expect(dispatcher.sendToolResult).toHaveBeenCalledWith({
+        text: "Still working on this — I’ll send the result here when it’s ready.",
+        isStatusNotice: true,
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(dispatcher.sendToolResult).toHaveBeenCalledOnce();
+
+      finishReply?.({ text: "done" });
+      await dispatch;
+      expect(dispatcher.sendFinalReply).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps short turns quiet without a bounded-silence receipt", async () => {
+    setNoAbort();
+    sessionStoreMocks.currentEntry = {
+      verboseLevel: "on",
+    };
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+      ChatType: "group",
+      From: "whatsapp:group:123@g.us",
+      SessionKey: "agent:main:whatsapp:group:123@g.us",
+    });
+
+    vi.useFakeTimers();
+    try {
+      await dispatchReplyFromConfig({
+        ctx,
+        cfg: automaticGroupReplyConfig,
+        dispatcher,
+        replyResolver: async () => ({ text: "done" }),
+      });
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(dispatcher.sendToolResult).not.toHaveBeenCalled();
+      expect(dispatcher.sendFinalReply).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels the bounded-silence receipt after visible verbose progress", async () => {
+    setNoAbort();
+    sessionStoreMocks.currentEntry = {
+      verboseLevel: "on",
+    };
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+      ChatType: "group",
+      From: "whatsapp:group:123@g.us",
+      SessionKey: "agent:main:whatsapp:group:123@g.us",
+    });
+    let finishReply: ((payload: ReplyPayload) => void) | undefined;
+    const pendingReply = new Promise<ReplyPayload>((resolve) => {
+      finishReply = resolve;
+    });
+    let markProgressDelivered: (() => void) | undefined;
+    const progressDelivered = new Promise<void>((resolve) => {
+      markProgressDelivered = resolve;
+    });
+    const replyResolver = async (
+      _ctx: MsgContext,
+      opts?: GetReplyOptions,
+      _cfg?: OpenClawConfig,
+    ) => {
+      await opts?.onItemEvent?.({
+        itemId: "c1",
+        kind: "preamble",
+        progressText: "checking the config",
+      });
+      await requireToolResultHandler(opts?.onToolResult)({ text: "🔧 exec: ok" });
+      markProgressDelivered?.();
+      return await pendingReply;
+    };
+
+    vi.useFakeTimers();
+    try {
+      const dispatch = dispatchReplyFromConfig({
+        ctx,
+        cfg: automaticGroupReplyConfig,
+        dispatcher,
+        replyResolver,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await progressDelivered;
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const progressTexts = (dispatcher.sendToolResult as ReturnType<typeof vi.fn>).mock.calls.map(
+        ([payload]) => (payload as ReplyPayload).text,
+      );
+      expect(progressTexts).toEqual(["💬 checking the config", "🔧 exec: ok"]);
+      expect(progressTexts).not.toContain(
+        "Still working on this — I’ll send the result here when it’s ready.",
+      );
+      finishReply?.({ text: "done" });
+      await dispatch;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("delivers verbose inter-tool commentary as standalone progress messages before the tool summary", async () => {
     setNoAbort();
     sessionStoreMocks.currentEntry = {
