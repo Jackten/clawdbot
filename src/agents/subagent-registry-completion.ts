@@ -9,7 +9,10 @@ import {
   SUBAGENT_KILL_TASK_ERROR,
   type DetachedTaskTerminalState,
 } from "../tasks/detached-task-runtime-contract.js";
-import { resolveRequiredCompletionTerminalResult } from "../tasks/task-completion-contract.js";
+import {
+  formatCompletedWithoutReplyError,
+  resolveRequiredCompletionTerminalResult,
+} from "../tasks/task-completion-contract.js";
 import type { SubagentRunOutcome } from "./subagent-announce-output.js";
 import {
   SUBAGENT_ENDED_REASON_KILLED,
@@ -102,13 +105,25 @@ export function resolveFinalizedSubagentTaskState(
       entry.expectsCompletionMessage === true
         ? resolveRequiredCompletionTerminalResult(completion.resultText)
         : {};
+    if (terminal.terminalOutcome === "blocked") {
+      const error = formatCompletedWithoutReplyError(
+        terminal.terminalSummary ?? "Required completion did not produce a final deliverable.",
+      );
+      return {
+        status: "failed",
+        endedAt,
+        lastEventAt: endedAt,
+        error,
+        progressSummary,
+        terminalSummary: error,
+      };
+    }
     return {
       status: "succeeded",
       endedAt,
       lastEventAt: endedAt,
       progressSummary,
-      terminalSummary: terminal.terminalSummary ?? null,
-      terminalOutcome: terminal.terminalOutcome,
+      terminalSummary: null,
     };
   }
   return {

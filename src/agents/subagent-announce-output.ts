@@ -54,6 +54,7 @@ type SubagentOutputSnapshot = {
   latestAssistantText?: string;
   latestSilentText?: string;
   latestToolCallCount?: number;
+  artifactReferences?: string[];
   waitingForContinuation?: boolean;
 };
 
@@ -135,6 +136,53 @@ function countAssistantToolCalls(message: unknown): number {
   return contentToolCalls + (Array.isArray(toolCalls) ? toolCalls.length : 0);
 }
 
+function collectStructuredArtifactReferences(message: unknown): string[] {
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return [];
+  }
+  const record = message as Record<string, unknown>;
+  if (record.role !== "tool" && record.role !== "toolResult") {
+    return [];
+  }
+  const details =
+    record.details && typeof record.details === "object" && !Array.isArray(record.details)
+      ? (record.details as Record<string, unknown>)
+      : undefined;
+  const media =
+    details?.media && typeof details.media === "object" && !Array.isArray(details.media)
+      ? (details.media as Record<string, unknown>)
+      : undefined;
+  if (!media || media.outbound === false) {
+    return [];
+  }
+  const references = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === "string" && value.trim()) {
+      references.add(value.trim());
+    }
+  };
+  for (const field of ["media", "path", "url", "mediaUrl", "filePath", "fileUrl"]) {
+    add(media[field]);
+  }
+  if (Array.isArray(media.mediaUrls)) {
+    for (const value of media.mediaUrls) {
+      add(value);
+    }
+  }
+  if (Array.isArray(media.attachments)) {
+    for (const value of media.attachments) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        continue;
+      }
+      const attachment = value as Record<string, unknown>;
+      for (const field of ["media", "path", "url", "mediaUrl", "filePath", "fileUrl"]) {
+        add(attachment[field]);
+      }
+    }
+  }
+  return [...references];
+}
+
 function summarizeSubagentOutputHistory(messages: Array<unknown>): SubagentOutputSnapshot {
   const snapshot: SubagentOutputSnapshot = {};
   let previousAssistantCalledYield = false;
@@ -143,6 +191,15 @@ function summarizeSubagentOutputHistory(messages: Array<unknown>): SubagentOutpu
       continue;
     }
     const role = (message as { role?: unknown }).role;
+    if (role === "user") {
+      snapshot.latestAssistantText = undefined;
+      snapshot.latestSilentText = undefined;
+      snapshot.latestToolCallCount = undefined;
+      snapshot.artifactReferences = undefined;
+      snapshot.waitingForContinuation = undefined;
+      previousAssistantCalledYield = false;
+      continue;
+    }
     if (role === "assistant") {
       if (assistantCallsSessionsYield(message)) {
         snapshot.latestAssistantText = undefined;
@@ -179,25 +236,52 @@ function summarizeSubagentOutputHistory(messages: Array<unknown>): SubagentOutpu
       previousAssistantCalledYield = false;
       continue;
     }
+    const artifactReferences = collectStructuredArtifactReferences(message);
+    if (artifactReferences.length > 0) {
+      snapshot.artifactReferences = [
+        ...new Set([...(snapshot.artifactReferences ?? []), ...artifactReferences]),
+      ];
+    }
     previousAssistantCalledYield = false;
   }
   return snapshot;
+}
+
+function appendArtifactReferences(text: string | undefined, references: string[]): string {
+  const missingReferences = references.filter((reference) => !text?.includes(reference));
+  if (missingReferences.length === 0) {
+    return text ?? "";
+  }
+  const artifactBlock = [
+    "Artifacts:",
+    ...missingReferences.map((reference) => `- ${reference}`),
+  ].join("\n");
+  return text?.trim() ? `${text.trim()}\n\n${artifactBlock}` : artifactBlock;
 }
 
 function selectSubagentOutputText(snapshot: SubagentOutputSnapshot): string | undefined {
   if (snapshot.waitingForContinuation) {
     return undefined;
   }
+  const artifactReferences = snapshot.artifactReferences ?? [];
   if (snapshot.latestSilentText) {
-    return snapshot.latestSilentText;
+    return appendArtifactReferences(snapshot.latestSilentText, artifactReferences);
   }
   if (snapshot.latestAssistantText) {
-    return snapshot.latestAssistantText;
+    return appendArtifactReferences(snapshot.latestAssistantText, artifactReferences);
+  }
+  if (artifactReferences.length > 0) {
+    return appendArtifactReferences(undefined, artifactReferences);
   }
   if (snapshot.latestToolCallCount && snapshot.latestToolCallCount > 0) {
     return `${snapshot.latestToolCallCount} tool call(s) made without visible output.`;
   }
   return undefined;
+}
+
+/** Select terminal assistant output plus trusted structured artifact references. */
+export function selectAgentCompletionOutput(messages: Array<unknown>): string | undefined {
+  return selectSubagentOutputText(summarizeSubagentOutputHistory(messages));
 }
 
 export async function readSubagentOutput(
@@ -228,8 +312,7 @@ export async function readSubagentOutput(
         })
       : undefined;
   const sourceMessages = messages ?? (Array.isArray(history?.messages) ? history.messages : []);
-  const snapshot = summarizeSubagentOutputHistory(sourceMessages);
-  const selected = selectSubagentOutputText(snapshot);
+  const selected = selectAgentCompletionOutput(sourceMessages);
   if (selected?.trim()) {
     return selected;
   }

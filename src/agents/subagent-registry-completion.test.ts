@@ -101,10 +101,10 @@ describe("emitSubagentEndedHookOnce", () => {
     });
 
     expect(terminal).toMatchObject({
-      status: "succeeded",
-      terminalOutcome: "blocked",
+      status: "failed",
+      error: expect.stringContaining("completed_without_reply"),
       terminalSummary:
-        "Required completion ended with progress-only text, not a final deliverable.",
+        "completed_without_reply: Required completion ended with progress-only text, not a final deliverable.",
     });
   });
 

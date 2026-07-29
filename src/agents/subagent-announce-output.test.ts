@@ -208,6 +208,68 @@ describe("readSubagentOutput", () => {
     await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBeUndefined();
   });
 
+  it("preserves structured artifact references when the final assistant turn is empty", async () => {
+    installOutputDeps({
+      messages: [
+        {
+          role: "toolResult",
+          content: [{ type: "text", text: "opaque tool output" }],
+          details: {
+            media: {
+              attachments: [
+                {
+                  type: "file",
+                  name: "nyc-date-plan.pdf",
+                  fileUrl: "https://files.example/nyc-date-plan.pdf",
+                },
+              ],
+            },
+          },
+        },
+        {
+          role: "assistant",
+          stopReason: "stop",
+          content: [],
+        },
+      ],
+    });
+
+    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBe(
+      "Artifacts:\n- https://files.example/nyc-date-plan.pdf",
+    );
+  });
+
+  it("does not attach an earlier task artifact to a later completion", async () => {
+    installOutputDeps({
+      messages: [
+        {
+          role: "toolResult",
+          details: {
+            media: {
+              fileUrl: "https://files.example/old-plan.pdf",
+            },
+          },
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "The old task is complete." }],
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "Now check the weather." }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "It will be sunny." }],
+        },
+      ],
+    });
+
+    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBe(
+      "It will be sunny.",
+    );
+  });
+
   it("reads recovered output from the private transcript before gateway history", async () => {
     const deps = installOutputDeps({
       messages: [

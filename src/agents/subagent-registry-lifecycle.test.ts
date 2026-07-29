@@ -1707,7 +1707,7 @@ describe("subagent registry lifecycle hardening", () => {
     });
   });
 
-  it("marks required progress-only completions blocked without failing the task", async () => {
+  it("fails required progress-only completions with an explicit empty-reply code", async () => {
     const entry = createRunEntry({
       expectsCompletionMessage: true,
     });
@@ -1725,19 +1725,20 @@ describe("subagent registry lifecycle hardening", () => {
       triggerCleanup: false,
     });
 
-    expectFields(firstCallArg(taskExecutorMocks.completeTaskRunByRunId), {
+    expectFields(firstCallArg(taskExecutorMocks.failTaskRunByRunId), {
       runId: entry.runId,
       runtime: "subagent",
       sessionKey: entry.childSessionKey,
       progressSummary: "I'll inspect the repo now.",
-      terminalOutcome: "blocked",
       terminalSummary:
-        "Required completion ended with progress-only text, not a final deliverable.",
+        "completed_without_reply: Required completion ended with progress-only text, not a final deliverable.",
+      error:
+        "completed_without_reply: Required completion ended with progress-only text, not a final deliverable.",
     });
-    expect(taskExecutorMocks.failTaskRunByRunId).not.toHaveBeenCalled();
+    expect(taskExecutorMocks.completeTaskRunByRunId).not.toHaveBeenCalled();
   });
 
-  it("marks missing required completions blocked while preserving real final reports", async () => {
+  it("fails missing required completions while preserving real final reports", async () => {
     const missingEntry = createRunEntry({
       expectsCompletionMessage: true,
     });
@@ -1752,12 +1753,14 @@ describe("subagent registry lifecycle hardening", () => {
       triggerCleanup: false,
     });
 
-    expectFields(firstCallArg(taskExecutorMocks.completeTaskRunByRunId), {
+    expectFields(firstCallArg(taskExecutorMocks.failTaskRunByRunId), {
       runId: missingEntry.runId,
-      terminalOutcome: "blocked",
-      terminalSummary: "Required completion did not produce a final deliverable.",
+      error: "completed_without_reply: Required completion did not produce a final deliverable.",
+      terminalSummary:
+        "completed_without_reply: Required completion did not produce a final deliverable.",
     });
 
+    taskExecutorMocks.failTaskRunByRunId.mockClear();
     taskExecutorMocks.completeTaskRunByRunId.mockClear();
     const finalEntry = createRunEntry({
       runId: "run-final",
@@ -1847,7 +1850,7 @@ describe("subagent registry lifecycle hardening", () => {
     expect(finalArg.terminalOutcome).toBeUndefined();
   });
 
-  it("keeps required completions blocked when progress text only adds follow-up planning", async () => {
+  it("fails required completions when progress text only adds follow-up planning", async () => {
     const entry = createRunEntry({
       expectsCompletionMessage: true,
     });
@@ -1865,14 +1868,15 @@ describe("subagent registry lifecycle hardening", () => {
       triggerCleanup: false,
     });
 
-    expectFields(firstCallArg(taskExecutorMocks.completeTaskRunByRunId), {
+    expectFields(firstCallArg(taskExecutorMocks.failTaskRunByRunId), {
       runId: entry.runId,
       runtime: "subagent",
       sessionKey: entry.childSessionKey,
       progressSummary: "I'll inspect the repo now. Then I'll run tests and report back.",
-      terminalOutcome: "blocked",
       terminalSummary:
-        "Required completion ended with progress-only text, not a final deliverable.",
+        "completed_without_reply: Required completion ended with progress-only text, not a final deliverable.",
+      error:
+        "completed_without_reply: Required completion ended with progress-only text, not a final deliverable.",
     });
   });
 
