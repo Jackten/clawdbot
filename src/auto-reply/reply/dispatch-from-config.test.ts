@@ -3811,7 +3811,7 @@ describe("dispatchReplyFromConfig", () => {
   it("emits one generic receipt after a bounded interval with no visible progress", async () => {
     setNoAbort();
     sessionStoreMocks.currentEntry = {
-      verboseLevel: "on",
+      verboseLevel: "off",
     };
     const dispatcher = createDispatcher();
     const ctx = buildTestCtx({
@@ -3953,6 +3953,107 @@ describe("dispatchReplyFromConfig", () => {
       );
       finishReply?.({ text: "done" });
       await dispatch;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("serializes an in-flight routed receipt ahead of the terminal reply", async () => {
+    setNoAbort();
+    installThreadingTestPlugin({ id: "telegram" });
+    sessionStoreMocks.currentEntry = {
+      verboseLevel: "off",
+    };
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "slack",
+      Surface: "slack",
+      OriginatingChannel: "telegram",
+      OriginatingTo: "telegram:999",
+      ChatType: "group",
+      SessionKey: "agent:main:slack:channel:C123",
+    });
+    let finishReply: ((payload: ReplyPayload) => void) | undefined;
+    const pendingReply = new Promise<ReplyPayload>((resolve) => {
+      finishReply = resolve;
+    });
+    let finishReceipt: (() => void) | undefined;
+    mocks.routeReply.mockImplementation(async (params: unknown) => {
+      const payload = (params as { payload?: ReplyPayload }).payload;
+      if (payload?.text === "Still working on this — I’ll send the result here when it’s ready.") {
+        await new Promise<void>((resolve) => {
+          finishReceipt = resolve;
+        });
+      }
+      return { ok: true, messageId: "mock" };
+    });
+
+    vi.useFakeTimers();
+    try {
+      const dispatch = dispatchReplyFromConfig({
+        ctx,
+        cfg: automaticGroupReplyConfig,
+        dispatcher,
+        replyResolver: async () => await pendingReply,
+      });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(mocks.routeReply).toHaveBeenCalledOnce();
+
+      finishReply?.({ text: "done" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.routeReply).toHaveBeenCalledOnce();
+
+      finishReceipt?.();
+      await dispatch;
+      expect(mocks.routeReply).toHaveBeenCalledTimes(2);
+      const finalCall = mocks.routeReply.mock.calls[1]?.[0] as
+        | { payload?: ReplyPayload }
+        | undefined;
+      expect(finalCall?.payload?.text).toBe("done");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("contains a rejected routed receipt without losing the terminal reply", async () => {
+    setNoAbort();
+    installThreadingTestPlugin({ id: "telegram" });
+    sessionStoreMocks.currentEntry = {
+      verboseLevel: "off",
+    };
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "slack",
+      Surface: "slack",
+      OriginatingChannel: "telegram",
+      OriginatingTo: "telegram:999",
+      ChatType: "group",
+      SessionKey: "agent:main:slack:channel:C123",
+    });
+    let finishReply: ((payload: ReplyPayload) => void) | undefined;
+    const pendingReply = new Promise<ReplyPayload>((resolve) => {
+      finishReply = resolve;
+    });
+    mocks.routeReply
+      .mockRejectedValueOnce(new Error("routed receipt exploded"))
+      .mockResolvedValueOnce({ ok: true, messageId: "final" });
+
+    vi.useFakeTimers();
+    try {
+      const dispatch = dispatchReplyFromConfig({
+        ctx,
+        cfg: automaticGroupReplyConfig,
+        dispatcher,
+        replyResolver: async () => await pendingReply,
+      });
+      await vi.advanceTimersByTimeAsync(30_000);
+      finishReply?.({ text: "done" });
+      await dispatch;
+
+      expect(mocks.routeReply).toHaveBeenCalledTimes(2);
+      expect(globalMocks.logVerbose).toHaveBeenCalledWith(
+        expect.stringContaining("bounded-silence receipt failed: routed receipt exploded"),
+      );
     } finally {
       vi.useRealTimers();
     }

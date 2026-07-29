@@ -2015,6 +2015,7 @@ export async function dispatchReplyFromConfig(
   const routeReplyTo = replyRoute.to;
   const deliveryChannel = shouldRouteToOriginating ? routeReplyChannel : currentSurface;
   let boundedSilenceProgressTimer: ReturnType<typeof setTimeout> | undefined;
+  let boundedSilenceProgressTask: Promise<void> | undefined;
   let userVisibleDeliveryObserved = false;
   const clearBoundedSilenceProgressTimer = () => {
     if (!boundedSilenceProgressTimer) {
@@ -2026,6 +2027,9 @@ export async function dispatchReplyFromConfig(
   const markUserVisibleDeliveryObserved = () => {
     userVisibleDeliveryObserved = true;
     clearBoundedSilenceProgressTimer();
+  };
+  const waitForBoundedSilenceProgressTask = async () => {
+    await boundedSilenceProgressTask;
   };
   const shouldPrepareRoutedReplyDelivery = shouldRouteToOriginating && Boolean(routeReplyChannel);
   const replyContextAccountId = routeReplyChannel
@@ -2820,6 +2824,10 @@ export async function dispatchReplyFromConfig(
       if (hasVisibleFinalContent) {
         markInboundDedupeReplayUnsafe();
         finalReplyDeliveryStarted = true;
+        clearBoundedSilenceProgressTimer();
+        // If the receipt already claimed this turn, serialize the terminal
+        // payload behind it so routed sends cannot arrive in reverse order.
+        await waitForBoundedSilenceProgressTask();
       }
       const ttsPayload =
         payload.isReasoning === true || payload.isCommentary === true
@@ -3426,7 +3434,13 @@ export async function dispatchReplyFromConfig(
         return;
       }
       boundedSilenceProgressTimer = setTimeout(() => {
-        void maybeDeliverBoundedSilenceReceipt();
+        const task = maybeDeliverBoundedSilenceReceipt().catch((error: unknown) => {
+          logVerbose(
+            `dispatch-from-config: bounded-silence receipt failed: ${formatErrorMessage(error)}`,
+          );
+        });
+        boundedSilenceProgressTask = task;
+        trackDispatchLifecycleWork(task);
       }, BOUNDED_SILENCE_PROGRESS_MS);
       boundedSilenceProgressTimer.unref?.();
     };
@@ -3858,7 +3872,7 @@ export async function dispatchReplyFromConfig(
             ),
           trackDispatchLifecycleWork,
         ),
-    ).finally(clearBoundedSilenceProgressTimer);
+    );
     const sessionMetadataChanges = takeCommandSessionMetadataChanges(ctx);
     notifySessionMetadataChanges(sessionMetadataChanges);
     const finalDispatchAcquisition = await ensureDispatchReplyOperation("dispatch");
@@ -4126,5 +4140,8 @@ export async function dispatchReplyFromConfig(
     markIdle("message_error");
     failDispatchReplyOperation(err);
     throw err;
+  } finally {
+    clearBoundedSilenceProgressTimer();
+    await waitForBoundedSilenceProgressTask();
   }
 }
