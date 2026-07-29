@@ -3700,6 +3700,7 @@ export async function runCodexAppServerAttempt(
     };
     const yieldedOneShotCleanupDeferred =
       !timedOut &&
+      !runAbortController.signal.aborted &&
       params.cleanupBundleMcpOnRunEnd === true &&
       yieldDetected &&
       deferCodexNativeDescendantCleanup({
