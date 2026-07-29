@@ -1,7 +1,7 @@
 # Gateway durability stage worklog
 
-Date: 2026-07-28 (America/Puerto_Rico)  
-Starting revision: `d4a980f20f2`  
+Date: 2026-07-28 (America/Puerto_Rico)
+Starting revision: `d4a980f20f2`
 Branch: `overlay/mac-custom-v2026.7.1-update-20260716T035951-reviewed`
 
 ## Outcome summary
