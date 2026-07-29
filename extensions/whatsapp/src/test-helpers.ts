@@ -705,14 +705,14 @@ export function resetBaileysMocks() {
     implementation: useMultiFileAuthStateImpl,
   });
 
-  const fetchLatestBaileysVersion = vi.mocked(baileys.fetchLatestBaileysVersion);
-  const fetchLatestBaileysVersionImpl: typeof baileys.fetchLatestBaileysVersion = (...args) =>
-    (
-      recreated.mod.fetchLatestBaileysVersion as unknown as typeof baileys.fetchLatestBaileysVersion
-    )(...args);
+  const fetchLatestWaWebVersion = vi.mocked(baileys.fetchLatestWaWebVersion);
+  const fetchLatestWaWebVersionImpl: typeof baileys.fetchLatestWaWebVersion = (...args) =>
+    (recreated.mod.fetchLatestWaWebVersion as unknown as typeof baileys.fetchLatestWaWebVersion)(
+      ...args,
+    );
   resetMockExport({
-    current: fetchLatestBaileysVersion,
-    implementation: fetchLatestBaileysVersionImpl,
+    current: fetchLatestWaWebVersion,
+    implementation: fetchLatestWaWebVersionImpl,
   });
 
   const makeCacheableSignalKeyStore = vi.mocked(baileys.makeCacheableSignalKeyStore);

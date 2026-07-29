@@ -29,7 +29,7 @@ import {
 import { renderQrTerminal } from "./qr-terminal.js";
 import { getStatusCode } from "./session-errors.js";
 import {
-  fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   makeWASocket,
   useMultiFileAuthState,
@@ -188,7 +188,10 @@ export async function createWaSocket(
   const saveCreds = async () => {
     await writeCredsJsonAtomically(authDir, state.creds);
   };
-  const { version } = await fetchLatestBaileysVersion();
+  // Resolve WhatsApp Web's current version for every socket creation. Baileys'
+  // release-pinned version helper can lag the live protocol and trigger setup
+  // rejection (status 405) until the dependency publishes another release.
+  const { version } = await fetchLatestWaWebVersion();
   const waWebSocketUrl = resolveWaWebSocketUrl(opts.waWebSocketUrl) ?? resolveEnvWaWebSocketUrl();
   const agent = await resolveEnvProxyAgent(sessionLogger);
   const fetchAgent = await resolveEnvFetchDispatcher(sessionLogger, agent);

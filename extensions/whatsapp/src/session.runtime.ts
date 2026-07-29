@@ -2,7 +2,7 @@
 export {
   BufferJSON,
   DisconnectReason,
-  fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   makeWASocket,
   useMultiFileAuthState,
