@@ -382,6 +382,7 @@ export async function handleInlineActions(params: {
           provider,
           model,
           senderIsOwner: command.senderIsOwner,
+          thinkingLevel: (await resolveModelLevels()).resolvedThinkLevel,
           senderId: command.senderId,
           currentChannelId: command.channelId,
           groupId: extractExplicitGroupId(ctx.From),
