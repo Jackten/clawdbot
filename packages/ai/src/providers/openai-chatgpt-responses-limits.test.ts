@@ -152,20 +152,24 @@ describe("OpenAI ChatGPT Responses resource limits", () => {
     );
     const chunks = split ? [frame.subarray(0, byteLimit), frame.subarray(byteLimit)] : [frame];
     let cancelReason: unknown;
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        const chunk = chunks.shift();
-        if (chunk) {
-          controller.enqueue(chunk);
-        } else {
-          controller.close();
-        }
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          const chunk = chunks.shift();
+          if (chunk) {
+            controller.enqueue(chunk);
+          } else {
+            controller.close();
+          }
+        },
+        cancel(reason) {
+          cancelReason = reason;
+          return new Promise<void>(() => {});
+        },
       },
-      cancel(reason) {
-        cancelReason = reason;
-        return new Promise<void>(() => {});
-      },
-    });
+      // Keep the source open until the parser requests EOF so cancellation is observable.
+      { highWaterMark: 0 },
+    );
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(body)));
 
     const result = await streamOpenAICodexResponses(model, context, {
