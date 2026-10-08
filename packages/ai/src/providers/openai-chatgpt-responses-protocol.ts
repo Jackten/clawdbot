@@ -1,7 +1,8 @@
 import { MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE } from "../transports/transport-utils.js";
-import { createSseByteGuard } from "../utils/streaming-byte-guard.js";
 
-const OPENAI_CHATGPT_RESPONSES_SUCCESS_BODY_MAX_BYTES = 16 * 1024 * 1024;
+// Bound one unterminated SSE frame, not the whole stream: long reasoning turns
+// legitimately stream far more than this in total across many small events.
+const OPENAI_CHATGPT_RESPONSES_SSE_PENDING_BUFFER_MAX_CHARS = 16 * 1024 * 1024;
 
 export class CodexProtocolError extends Error {
   readonly payload?: unknown;
@@ -22,21 +23,21 @@ export async function* parseOpenAIChatGptResponsesSse(
   }
 
   const reader = response.body.getReader();
-  // Cap the streaming 200 success-body read at 16 MiB, mirroring the
-  // non-streaming response cap so a hostile endpoint cannot exhaust memory.
-  const guard = createSseByteGuard(reader, {
-    maxBytes: OPENAI_CHATGPT_RESPONSES_SUCCESS_BODY_MAX_BYTES,
-    onOverflow: ({ size, maxBytes }) =>
-      new Error(
-        `OpenAI ChatGPT Responses success body exceeded ${maxBytes} bytes (received ${size})`,
-      ),
-  });
+  let cancelled = false;
+  const cancelReaderBestEffort = (reason?: unknown): void => {
+    if (cancelled) {
+      return;
+    }
+    cancelled = true;
+    // Upstream cancellation may never settle; cleanup cannot gate the primary outcome.
+    void reader.cancel(reason).catch(() => undefined);
+  };
   const decoder = new TextDecoder();
   let buffer = "";
 
   try {
     while (true) {
-      const { done, value } = await guard.read();
+      const { done, value } = await reader.read();
       if (value) {
         buffer += decoder.decode(value, { stream: true });
       }
@@ -83,11 +84,18 @@ export async function* parseOpenAIChatGptResponsesSse(
       if (done) {
         break;
       }
+      // Only an unterminated frame remains buffered; a hostile endpoint that never
+      // emits a frame boundary cannot exhaust memory.
+      if (buffer.length > OPENAI_CHATGPT_RESPONSES_SSE_PENDING_BUFFER_MAX_CHARS) {
+        const error = new Error(
+          `OpenAI ChatGPT Responses SSE response exceeded max pending buffer size (${OPENAI_CHATGPT_RESPONSES_SSE_PENDING_BUFFER_MAX_CHARS} chars) without event boundary`,
+        );
+        cancelReaderBestEffort(error);
+        throw error;
+      }
     }
   } finally {
-    try {
-      await guard.cancel();
-    } catch {}
+    cancelReaderBestEffort();
     try {
       reader.releaseLock();
     } catch {}
