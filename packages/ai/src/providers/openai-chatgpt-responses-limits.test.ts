@@ -84,12 +84,10 @@ describe("OpenAI ChatGPT Responses resource limits", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("accepts well-framed success streams whose total size exceeds the pending-frame bound", async () => {
-    // Long reasoning turns legitimately stream more than 16 MiB in total; only
-    // a single unterminated frame should be bounded.
+  it.each([1, 320])("accepts over 16 MiB with %i complete frames per read", async (batchSize) => {
     const pad = "x".repeat(64 * 1024);
     const progressFrame = new TextEncoder().encode(
-      `data: ${JSON.stringify({ type: "response.in_progress", pad })}\n\n`,
+      `data: ${JSON.stringify({ type: "response.in_progress", pad })}\n\n`.repeat(batchSize),
     );
     const completedFrame = new TextEncoder().encode(
       `data: ${JSON.stringify({
@@ -102,7 +100,7 @@ describe("OpenAI ChatGPT Responses resource limits", () => {
         },
       })}\n\n`,
     );
-    const progressFrames = 320; // ~20 MiB total
+    const progressFrames = 320 / batchSize; // ~20 MiB total
     let sent = 0;
     const longStream = new ReadableStream<Uint8Array>({
       pull(controller) {
@@ -135,6 +133,50 @@ describe("OpenAI ChatGPT Responses resource limits", () => {
     expect(sent * progressFrame.byteLength).toBeGreaterThan(16 * 1024 * 1024);
     expect(result.errorMessage).toBeUndefined();
     expect(result.stopReason).toBe("stop");
+  });
+
+  it.each([
+    { label: "complete in one read", ending: "\n\n", split: false, char: "x" },
+    { label: "delimiter in the limit-crossing read", ending: "\r\n\r\n", split: true, char: "x" },
+    { label: "EOF", ending: "", split: false, char: "x" },
+    {
+      label: "UTF-8 byte overflow below the character cap",
+      ending: "\n\n",
+      split: true,
+      char: "😀",
+    },
+  ])("rejects oversized frames: $label", async ({ ending, split, char }) => {
+    const byteLimit = 16 * 1024 * 1024;
+    const frame = new TextEncoder().encode(
+      `data: ${JSON.stringify({ type: "response.in_progress", pad: char.repeat(byteLimit / Buffer.byteLength(char)) })}${ending}`,
+    );
+    const chunks = split ? [frame.subarray(0, byteLimit), frame.subarray(byteLimit)] : [frame];
+    let cancelReason: unknown;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks.shift();
+        if (chunk) {
+          controller.enqueue(chunk);
+        } else {
+          controller.close();
+        }
+      },
+      cancel(reason) {
+        cancelReason = reason;
+        return new Promise<void>(() => {});
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(body)));
+
+    const result = await streamOpenAICodexResponses(model, context, {
+      apiKey: createJwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }),
+      transport: "sse",
+    }).result();
+
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toBe("OpenAI ChatGPT Responses SSE frame exceeded 16777216 bytes");
+    expect(cancelReason).toBeInstanceOf(Error);
+    expect(body.locked).toBe(false);
   });
 
   it("bounds an unterminated streamed success frame without content-length", async () => {
@@ -174,7 +216,7 @@ describe("OpenAI ChatGPT Responses resource limits", () => {
 
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toMatch(
-      /OpenAI ChatGPT Responses SSE response exceeded max pending buffer size \(16777216 chars\)/,
+      /OpenAI ChatGPT Responses SSE frame exceeded 16777216 bytes/,
     );
     expect(cancelReason).toBeInstanceOf(Error);
     expect(pullCount).toBeGreaterThanOrEqual(17);
